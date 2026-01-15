@@ -1,6 +1,5 @@
 #include "KeyHandlers.h"
 #include "Globals.h"
-#include "Debug.h"
 #include "Queuing.h"
 
 // Local state for tracking LEDs

@@ -2,20 +2,24 @@
 #include <Arduino.h>
 
 void saveToFile(const WordMetadata& data) {
-    // Format : [WINDOW] word (Avg: 0.000s, Var: 0.000, Ent: 0.00)
-    Serial.print("SAVING: [");
-    Serial.print(data.windowName);
+    // Format enrichi pour le debugging et l'IA
+    // SAVING: [TS:123456] mot (Avg: 0.1234s, Var: 0.0000, Ent: 2.50)
+
+    Serial.print("SAVING: [TS:");
+    Serial.print(data.timestamp);
     Serial.print("] ");
     Serial.print(data.word);
 
+    // On affiche les stats uniquement si le mot n'est pas un raccourci vide d'intérêt
     if (data.avgInterval > 0.0001f || data.entropy > 0.0001f) {
         Serial.print(" (Avg: ");
         Serial.print(data.avgInterval, 4);
         Serial.print("s, Var: ");
-        Serial.print(data.variance, 6);
+        Serial.print(data.variance, 6); // La variance est souvent très petite
         Serial.print(", Ent: ");
         Serial.print(data.entropy, 2);
         Serial.print(")");
     }
+
     Serial.println();
 }

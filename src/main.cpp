@@ -63,8 +63,7 @@ void loop() {
     digitalWrite(13, LOW);
   }
 
-  // --- 2. Standard USB Tasks ---
   myusb.Task();
-  ShowUpdatedDeviceListInfo();
+  // ShowUpdatedDeviceListInfo();
   threads.yield();
 }
