@@ -14,10 +14,10 @@ KeyboardController keyboard2(myusb);
 USBHIDParser hid1(myusb);
 USBHIDParser hid2(myusb);
 
-// --- The Trojan Horse Interface ---
 extern "C" {
-  extern volatile uint8_t custom_feature_buffer[64];
+  extern volatile uint8_t custom_feature_buffer[66];
   extern volatile uint8_t custom_feature_data_ready;
+  extern volatile uint16_t custom_feature_len_received; // Add this
 }
 
 void setup() {
@@ -46,24 +46,31 @@ void setup() {
 }
 
 void loop() {
-  // --- 1. Check for Secret PC Data ---
   if (custom_feature_data_ready) {
-    // Flash LED on pin 13 to show data was received
     digitalWrite(13, HIGH);
-
-    // Acknowledge the data immediately so usb.c can receive more
     custom_feature_data_ready = 0;
 
-    // Process the command
-    if (custom_feature_buffer[0] == 0x41) { // Command 'A'
+    // --- SMART OFFSET DETECTION ---
+    // If we got 65 bytes, Windows put the Report ID at [0]. Data starts at [1].
+    // If we got 64 bytes, Data starts at [0].
+    int data_offset = (custom_feature_len_received == 65) ? 1 : 0;
+
+    // Check the data at the calculated offset
+    if (custom_feature_buffer[data_offset] == 0x41) {
       Keyboard.println("PC Command A: Triggered!");
     }
 
-    delay(10); // Tiny debounce for the LED
+    // Debugging: Print exactly what we received
+    /*
+    Serial.print("Len: "); Serial.println(custom_feature_len_received);
+    Serial.print("Byte[0]: "); Serial.println(custom_feature_buffer[0], HEX);
+    Serial.print("Byte[1]: "); Serial.println(custom_feature_buffer[1], HEX);
+    */
+
+    delay(10);
     digitalWrite(13, LOW);
   }
 
   myusb.Task();
-  // ShowUpdatedDeviceListInfo();
   threads.yield();
 }
