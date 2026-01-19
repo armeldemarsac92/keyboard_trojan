@@ -1,4 +1,12 @@
+#include <Arduino.h>
+#include <core_pins.h>
+#include <keylayouts.h>
+#include <usb_keyboard.h>
+
 #include "KeyHandlers.h"
+
+
+
 #include "Globals.h"
 #include "Queuing.h"
 

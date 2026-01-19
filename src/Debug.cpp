@@ -1,4 +1,9 @@
+#include <Arduino.h>
 #include "Debug.h"
+
+#include <core_pins.h>
+#include <usb_serial.h>
+
 #include "Globals.h"
 
 // Local device tracking arrays

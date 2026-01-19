@@ -1,9 +1,10 @@
-#include "Queuing.h"
+#include <Arduino.h>
 #include <USBHost_t36.h>
 #include <TeensyThreads.h>
 #include <cmath>
 #include <string.h> // Pour strncpy et strlen
-#include <stdio.h>  // Pour sprintf
+#include <stdio.h>
+#include "Queuing.h"
 #include "DataSaver.h"
 #include "TSHelper.h"
 #include "KeyHelper.h"

@@ -1,5 +1,10 @@
+#include <Arduino.h>
+#include <core_pins.h>
 #include <USBHost_t36.h>
 #include <TeensyThreads.h>
+#include <usb_keyboard.h>
+#include <usb_serial.h>
+
 #include "Globals.h"
 #include "KeyHandlers.h"
 #include "Debug.h"

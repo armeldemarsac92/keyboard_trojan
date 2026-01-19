@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <hidapi.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "hidapi.h"

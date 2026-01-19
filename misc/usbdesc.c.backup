@@ -213,7 +213,7 @@ static uint8_t keyboard_report_desc[] = {
     0x75, 0x08,                    //   Report Size (8 bits)
     0x95, 0x40,                    //   Report Count (64 bytes)
     0xB1, 0x02,                    //   FEATURE (Data, Variable, Absolute)
-
+d
     0xC0                            // End Collection
 };
 #endif
