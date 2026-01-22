@@ -1,5 +1,7 @@
 #include "DataSaver.h"
 #include <Arduino.h>
+#include "MemoryInfo.hpp"
+#include "ArduinoSQLite.hpp"
 
 void saveToFile(const WordMetadata& data) {
     // Format enrichi pour le debugging et l'IA

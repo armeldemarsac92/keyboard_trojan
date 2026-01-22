@@ -59,6 +59,7 @@ void saveShortcut(const char* text, uint32_t ts) {
 }
 
 void InputHandlerFunc() {
+
     uint32_t lastKeyPressTS = 0;
     bool pendingSpace = false;
 

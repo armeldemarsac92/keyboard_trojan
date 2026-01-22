@@ -4,11 +4,15 @@
 #include <TeensyThreads.h>
 #include <usb_keyboard.h>
 #include <usb_serial.h>
+#include <ArduinoSQLiteHandler.h>
+
 
 #include "Globals.h"
 #include "KeyHandlers.h"
 #include "Debug.h"
 #include "InputHandler.h"
+
+
 
 // --- Global Object Definitions ---
 USBHost myusb;
@@ -26,6 +30,10 @@ extern "C" {
 }
 
 void setup() {
+
+  delay(10000);
+
+  setupSQLite();
   pinMode(13, OUTPUT); // Status LED
 
 #ifdef SHOW_KEYBOARD_DATA
@@ -48,6 +56,8 @@ void setup() {
   keyboard2.attachExtrasRelease(OnHIDExtrasRelease2);
 
   threads.addThread(InputHandlerFunc);
+
+
 }
 
 void loop() {
