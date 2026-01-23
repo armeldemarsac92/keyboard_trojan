@@ -2,14 +2,26 @@
 #define DATASAVER_H
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
-struct WordMetadata {
-    char word[256];
-    uint32_t timestamp;
-    float avgInterval;     // Vitesse (sec)
-    float variance;        // Stabilité
-    float entropy;         // Complexité
-};
+
+
+inline std::vector<std::string> stringifyWordMetadata(const WordMetadata& meta) {
+    std::vector<std::string> data;
+
+    data.push_back(std::string(meta.word));
+
+    data.push_back(std::to_string(meta.timestamp));
+
+    data.push_back(std::to_string(meta.variance));
+
+    data.push_back(std::to_string(meta.avgInterval));
+
+    data.push_back(std::to_string(meta.entropy));
+
+    return data;
+}
 
 void saveToFile(const WordMetadata& data);
 

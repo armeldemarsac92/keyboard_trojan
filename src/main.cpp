@@ -4,17 +4,15 @@
 #include <TeensyThreads.h>
 #include <usb_keyboard.h>
 #include <usb_serial.h>
-#include <ArduinoSQLiteHandler.h>
+#include <string>
 
 
 #include "Globals.h"
 #include "KeyHandlers.h"
-#include "Debug.h"
 #include "InputHandler.h"
+#include "DatabaseManager.h"
 
 
-
-// --- Global Object Definitions ---
 USBHost myusb;
 USBHub hub1(myusb);
 USBHub hub2(myusb);
@@ -31,16 +29,14 @@ extern "C" {
 
 void setup() {
 
-  delay(10000);
-
-  setupSQLite();
-  pinMode(13, OUTPUT); // Status LED
-
-#ifdef SHOW_KEYBOARD_DATA
-  Serial.begin(1000000);
-  while (!Serial && millis() < 2000);
+  Serial.begin(115200);
+  while (!Serial && millis() < 10000);
   Serial.println("\n\nUSB Keyboard Forwarder (Modular)");
-#endif
+
+  DatabaseManager::getInstance();
+
+  pinMode(13, OUTPUT);
+
 
   myusb.begin();
 
@@ -56,8 +52,6 @@ void setup() {
   keyboard2.attachExtrasRelease(OnHIDExtrasRelease2);
 
   threads.addThread(InputHandlerFunc);
-
-
 }
 
 void loop() {

