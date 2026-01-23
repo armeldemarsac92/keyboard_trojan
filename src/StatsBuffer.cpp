@@ -1,7 +1,6 @@
 #include "StatsBuffer.h"
 
 StatsBuffer::StatsBuffer() {
-    // Optimization: Reserve memory once so it acts like a fixed array
     intervals.reserve(MAX_CAPACITY);
 }
 
@@ -12,7 +11,6 @@ void StatsBuffer::add(uint32_t interval) {
 }
 
 void StatsBuffer::backspace() {
-    // If user backspaces a letter, we remove the corresponding timing data
     if (!intervals.empty()) {
         intervals.pop_back();
     }
@@ -30,27 +28,41 @@ bool StatsBuffer::isEmpty() const {
     return intervals.empty();
 }
 
-// --- Math Logic (Calculated on the fly for the current word) ---
+// --- Math Logic (Now converts to Seconds) ---
 
 float StatsBuffer::getAverage() const {
     if (intervals.empty()) return 0.0f;
 
-    // Modern C++: accumulate sums up the vector
-    // 0.0 starts the sum as a double to prevent overflow
+    // 1. Calculate Sum in raw Milliseconds
     double sum = std::accumulate(intervals.begin(), intervals.end(), 0.0);
-    return (float)(sum / intervals.size());
+
+    // 2. Calculate Raw Average (ms)
+    double rawAvg = sum / intervals.size();
+
+    // 3. Convert to Seconds (1000 ms = 1.0 s)
+    return (float)(rawAvg / 1000000.0);
 }
 
 float StatsBuffer::getVariance() const {
     if (intervals.size() < 2) return 0.0f;
 
-    float mean = getAverage();
+    // NOTE: We calculate variance on the raw data (ms) first to preserve precision,
+    // then convert the final result to seconds^2.
+
+    double sum = std::accumulate(intervals.begin(), intervals.end(), 0.0);
+    double rawMean = sum / intervals.size();
+
     double sumSqDiff = 0.0;
 
     for (uint32_t val : intervals) {
-        float diff = val - mean;
+        double diff = val - rawMean;
         sumSqDiff += diff * diff;
     }
 
-    return (float)(sumSqDiff / intervals.size());
+    double rawVariance = sumSqDiff / intervals.size();
+
+    // Convert ms^2 to s^2
+    // (1 ms)^2 = (0.001 s)^2 = 0.000001 s^2
+    // So we divide by 1,000,000
+    return (float)(rawVariance / 1000000000.0);
 }

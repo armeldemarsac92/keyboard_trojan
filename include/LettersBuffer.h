@@ -10,7 +10,9 @@ private:
 public:
     LettersBuffer();
 
-    bool add(char c);
+    bool addChar(char keyCode, uint8_t modifier);
+    bool addShortcut(char keyCode, uint8_t modifier);
+
     void backspace();
     void clear();
 

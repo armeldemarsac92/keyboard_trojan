@@ -1,17 +1,41 @@
 #include "LettersBuffer.h"
 
+#include <array>
+#include <cmath>
+
+#include "AzertyLayout.h"
+
 LettersBuffer::LettersBuffer() {
     buffer.reserve(MAX_LEN);
 }
 
-bool LettersBuffer::add(char c) {
-    if (c == 0) return false;
+bool LettersBuffer::addChar(char keyCode, uint8_t modifier) {
+    if (keyCode == 0) return false;
 
     if (buffer.length() >= MAX_LEN) {
         return false;
     }
 
-    buffer.push_back(c);
+    char mappedAscii = AzertyLayout::mapKeyToAscii(keyCode, modifier);
+
+    if (mappedAscii == 0) {
+        return false;
+    }
+
+    buffer.push_back(mappedAscii);
+    return true;
+}
+
+bool LettersBuffer::addShortcut(char keyCode, uint8_t modifier) {
+    std::string shortcut = AzertyLayout::getShortcutName(keyCode, modifier);
+
+    if (shortcut.empty()) return false;
+
+    if (buffer.length() + shortcut.length() > MAX_LEN) {
+        return false;
+    }
+
+    buffer += shortcut;
     return true;
 }
 

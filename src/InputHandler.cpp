@@ -6,39 +6,16 @@
 #include <stdio.h>
 
 #include "AzertyLayout.h"
+#include "DatabaseManager.h"
 #include "Queuing.h"
-#include "DataSaver.h"
+#include "DataHelpers.h"
+#include "InputData.h"
 #include "KeyHelper.h"
 #include "LettersBuffer.h"
 #include "StatsBuffer.h"
 
 static LettersBuffer currentLettersBuffer;
 static StatsBuffer timeDeltaBetweenKeysBuffer;
-
-void handleSaving(const char* text, uint32_t ts, StatsBuffer& history) {
-    if (strlen(text) == 0) return;
-
-    WordMetadata data;
-    strncpy(data.word, text, 255);
-    data.word[255] = '\0';
-    data.timestamp = ts;
-    data.avgInterval = (float)history.getAverageDelta() / 1000000.0f;
-    data.variance = history.getVariance() / 1000000000000.0f;
-    data.entropy = calculateEntropy(text);
-
-    saveToFile(data);
-}
-
-void saveShortcut(const char* text, uint32_t ts) {
-    WordMetadata data;
-    strncpy(data.word, text, 255);
-    data.word[255] = '\0';
-    data.timestamp = ts;
-    data.avgInterval = 0.0f;
-    data.variance = 0.0f;
-    data.entropy = 0.0f;
-    saveToFile(data);
-}
 
 void InputHandlerFunc() {
 
@@ -47,7 +24,6 @@ void InputHandlerFunc() {
 
     while (true) {
         if (head != tail) {
-            // Copie sécurisée du volatile
             KeyEvent event;
             event.key = queue[tail].key;
             event.modifiers = queue[tail].modifiers;
@@ -61,28 +37,37 @@ void InputHandlerFunc() {
             if (lastKeyPressTS == 0) lastKeyPressTS = event.timestamp;
             uint32_t delta = event.timestamp - lastKeyPressTS;
 
-            // --- TRAITEMENT DES TOUCHES ---
+
             if (KeyHelper::hasModifier(event.modifiers) && event.key != 0) {
                 if (!currentLettersBuffer.isEmpty()) {
-                    handleSaving(currentLettersBuffer.get_c_str(), event.timestamp, timeDeltaBetweenKeysBuffer);
+                    DatabaseManager::getInstance().saveData(
+                        DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer)
+                    );
                     currentLettersBuffer.clear();
+                    timeDeltaBetweenKeysBuffer.clear();
                 }
-                std::string shortcut = AzertyLayout::getShortcutName(event.key, event.modifiers);
-                saveShortcut(shortcut, event.timestamp);
+
+                currentLettersBuffer.addShortcut(event.key, event.modifiers);
+
+                DatabaseManager::getInstance().saveData(
+                    DataHelpers::stringifyInputData(currentLettersBuffer, event.timestamp, timeDeltaBetweenKeysBuffer)
+                );
+                currentLettersBuffer.clear();
             }
-            else if (event.key >= 58 && event.key <= 69) { // F1-F12
-                char fKey[8];
-                sprintf(fKey, "[F%d]", (int)(event.key - 57));
-                saveShortcut(fKey, event.timestamp);
-            }
+
             else if (delta > 5000000 && !currentLettersBuffer.isEmpty() && !pendingSpace) {
-                 handleSaving(currentLettersBuffer.get(), event.timestamp, timeDeltaBetweenKeysBuffer);
+                 DatabaseManager::getInstance().saveData(
+                    DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer)
+                 );
                  currentLettersBuffer.clear();
                  timeDeltaBetweenKeysBuffer.clear();
             }
+
             else if (KeyHelper::isLetterOrNumber(event.key)) {
                 if (pendingSpace) {
-                    handleSaving(currentLettersBuffer.get(), event.timestamp, timeDeltaBetweenKeysBuffer);
+                    DatabaseManager::getInstance().saveData(
+                        DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer)
+                    );
                     currentLettersBuffer.clear();
                     timeDeltaBetweenKeysBuffer.clear();
                     pendingSpace = false;
@@ -90,38 +75,35 @@ void InputHandlerFunc() {
                 else if (!currentLettersBuffer.isEmpty()) {
                     timeDeltaBetweenKeysBuffer.add(delta);
                 }
-                currentLettersBuffer.add(event.key);
+
+                currentLettersBuffer.addChar(event.key, event.modifiers);
             }
+
             else if (KeyHelper::isBackspace(event.key)) {
                 if (pendingSpace) pendingSpace = false;
                 else {
                     currentLettersBuffer.backspace();
+                    timeDeltaBetweenKeysBuffer.backspace();
                     if (currentLettersBuffer.isEmpty()) timeDeltaBetweenKeysBuffer.clear();
                 }
             }
+
             else if (KeyHelper::isSpace(event.key)) {
                 if (!currentLettersBuffer.isEmpty()) pendingSpace = true;
             }
+
             else if (KeyHelper::isEnter(event.key)) {
                 if (!currentLettersBuffer.isEmpty()) {
-                    handleSaving(currentLettersBuffer.get(), event.timestamp, timeDeltaBetweenKeysBuffer);
+                    DatabaseManager::getInstance().saveData(
+                        DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer)
+                    );
                     currentLettersBuffer.clear();
                     timeDeltaBetweenKeysBuffer.clear();
                 }
                 pendingSpace = false;
-                saveShortcut("[ENTER]", event.timestamp);
-            }
-            else if (KeyHelper::isPunctuation(event.key)) {
-                if (pendingSpace || !currentLettersBuffer.isEmpty()) {
-                     handleSaving(currentLettersBuffer.getWord(), event.timestamp, timeDeltaBetweenKeysBuffer);
-                     currentLettersBuffer.clear();
-                     timeDeltaBetweenKeysBuffer.clear();
-                     pendingSpace = false;
-                }
-                // Optionnel : sauvegarder la ponctuation ici
+
             }
 
-            // Mise à jour systématique pour éviter les blocages
             lastKeyPressTS = event.timestamp;
             tail = (tail + 1) % Q_SIZE;
         } else {
@@ -129,4 +111,3 @@ void InputHandlerFunc() {
         }
     }
 }
-

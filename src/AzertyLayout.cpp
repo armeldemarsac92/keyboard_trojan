@@ -60,7 +60,7 @@ namespace AzertyLayout {
         return 0;
     }
 
-    std::string getShortcutName(uint8_t code, uint8_t modifiers) {
+    std::string getShortcutName(uint8_t code, uint8_t mods) {
         std::string result = "[";
 
         // Use 'reserve' to prevent multiple tiny memory allocations (optimization)

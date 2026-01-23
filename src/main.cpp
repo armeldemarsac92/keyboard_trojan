@@ -51,7 +51,7 @@ void setup() {
   keyboard2.attachExtrasPress(OnHIDExtrasPress2);
   keyboard2.attachExtrasRelease(OnHIDExtrasRelease2);
 
-  threads.addThread(InputHandlerFunc);
+  threads.addThread(InputHandlerFunc, 0, 32768);
 }
 
 void loop() {
@@ -81,5 +81,6 @@ void loop() {
   }
 
   myusb.Task();
+  DatabaseManager::getInstance().processQueue();
   threads.yield();
 }
