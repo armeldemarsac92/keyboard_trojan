@@ -36,7 +36,7 @@ void DatabaseManager::processQueue() {
     queueMutex.lock();
 
     bool shouldWrite = (pendingStatements.size() >= 20) ||
-                       (!pendingStatements.empty() && (millis() - lastWriteTime > 5000));
+                       (!pendingStatements.empty() && (millis() - lastWriteTime > 60000));
 
     if (!shouldWrite) {
         queueMutex.unlock();

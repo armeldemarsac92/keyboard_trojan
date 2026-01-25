@@ -11,6 +11,7 @@
 #include "KeyHandlers.h"
 #include "InputHandler.h"
 #include "DatabaseManager.h"
+#include  "RakManager.h"
 
 
 USBHost myusb;
@@ -28,9 +29,8 @@ extern "C" {
 }
 
 void setup() {
-
   Serial.begin(115200);
-  while (!Serial && millis() < 10000);
+  // while (!Serial);
   Serial.println("\n\nUSB Keyboard Forwarder (Modular)");
 
   DatabaseManager::getInstance();
@@ -52,6 +52,7 @@ void setup() {
   keyboard2.attachExtrasRelease(OnHIDExtrasRelease2);
 
   threads.addThread(InputHandlerFunc, 0, 32768);
+  RakManager::getInstance().begin();
 }
 
 void loop() {
