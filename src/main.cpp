@@ -11,6 +11,7 @@
 #include "KeyHandlers.h"
 #include "InputHandler.h"
 #include "DatabaseManager.h"
+#include "NlpManager.h"
 #include  "RakManager.h"
 
 
@@ -39,6 +40,7 @@ void setup() {
 
 
   myusb.begin();
+  NlpManager::getInstance().begin();
 
   // Attach Callbacks
   keyboard1.attachRawPress(OnRawPress1);

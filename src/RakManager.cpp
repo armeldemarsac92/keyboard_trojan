@@ -1,4 +1,5 @@
 #include "RakManager.h"
+#include "NlpManager.h"
 
 RakManager& RakManager::getInstance() {
     static RakManager instance;
@@ -19,19 +20,33 @@ void RakManager::begin() {
 
 void RakManager::listenerThread(void* arg) {
     while (1) {
-        // Check if data is available on the RAK port
         if (Serial1.available()) {
             Serial.println("[RAK] Listener started...");
             String incoming = Serial1.readStringUntil('\n');
             incoming.trim(); // Clean up
 
             if (incoming.length() > 0) {
-                Serial.print("[RAK MSG]: ");
-                Serial.println(incoming);
+                int separatorIndex = incoming.indexOf(':');
+                String cleanMessage;
+
+                if (separatorIndex != -1 && separatorIndex < 10) {
+                    cleanMessage = incoming.substring(separatorIndex + 1);
+                } else {
+                    cleanMessage = incoming;
+                }
+
+                cleanMessage.trim();
+
+                Serial.print("[RAK] Reçu: \"");
+                Serial.print(cleanMessage);
+                Serial.println("\"");
+
+                if (cleanMessage.length() > 1) {
+                    NlpManager::getInstance().analyzeSentence(cleanMessage);
+                }
             }
         }
 
-        // yield is crucial to let the rest of your Teensy run
         threads.yield();
     }
 }
