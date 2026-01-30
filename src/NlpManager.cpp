@@ -2,6 +2,8 @@
 #include "ModelWeights.h"
 #include <cstring>
 
+#include "RakManager.h"
+
 NlpManager& NlpManager::getInstance() {
     static NlpManager instance;
     return instance;
@@ -53,6 +55,9 @@ void NlpManager::processingThread(void* arg) {
             float confidence = 0.0f;
             int topicIdx = ai->predict_topic(localCopy, &confidence);
             unsigned long t1 = micros();
+            if (ai->_callback) {
+                ai->_callback(String(TOPICS[topicIdx]), confidence);
+            }
             
             Serial.print("[AI] Detected: ");
             Serial.print(TOPICS[topicIdx]);

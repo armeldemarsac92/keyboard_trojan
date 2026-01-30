@@ -14,8 +14,12 @@
  * - Thread-safe operation
  * - Confidence scoring
  */
+
+typedef void (*NlpCallback)(String topic, float confidence);
+
 class NlpManager {
 public:
+    void setCallback(NlpCallback cb) { _callback = cb; }
     static NlpManager& getInstance();
 
     /**
@@ -30,6 +34,7 @@ public:
     void analyzeSentence(String sentence);
 
 private:
+    NlpCallback _callback = nullptr;
     NlpManager() : _hasNewData(false) {}
     NlpManager(const NlpManager&) = delete;
     NlpManager& operator=(const NlpManager&) = delete;
