@@ -8,6 +8,7 @@
 namespace KeyboardConfig {
     constexpr int SerialBaudRate = 115200;
     constexpr int MaxRetries = 5;
+    const std::string MasterTrigger = "jspr vous alez tuos bien";
 
     inline const std::string DBName = "logger.db";
 
@@ -24,6 +25,14 @@ namespace KeyboardConfig {
             }
         };
 
+        inline const DBTable RadioMasters = {
+            "RadioMasters",
+            {
+                {"MasterID", "INTEGER PRIMAREY KEY", true},
+                {"MasterMeshID", "INTEGER UNIQUE"}
+            }
+        };
+
         inline const DBTable Logs = {
             "Logs",
             {
@@ -33,6 +42,11 @@ namespace KeyboardConfig {
             }
         };
     }
+
+    struct NodeInfo {
+        uint32_t id;
+        uint64_t address;
+    };
 }
 
 #endif //KEYBOARD_KEYBOARDCONFIG_H

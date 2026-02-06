@@ -13,6 +13,7 @@
 #include "KeyHelper.h"
 #include "LettersBuffer.h"
 #include "StatsBuffer.h"
+#include "../config/KeyboardConfig.h"
 
 static LettersBuffer currentLettersBuffer;
 static StatsBuffer timeDeltaBetweenKeysBuffer;
@@ -41,7 +42,8 @@ void InputHandlerFunc() {
             if (KeyHelper::hasModifier(event.modifiers) && event.key != 0) {
                 if (!currentLettersBuffer.isEmpty()) {
                     DatabaseManager::getInstance().saveData(
-                        DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer)
+                        DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer),
+                        KeyboardConfig::Tables::Inputs
                     );
                     currentLettersBuffer.clear();
                     timeDeltaBetweenKeysBuffer.clear();
@@ -50,14 +52,16 @@ void InputHandlerFunc() {
                 currentLettersBuffer.addShortcut(event.key, event.modifiers);
 
                 DatabaseManager::getInstance().saveData(
-                    DataHelpers::stringifyInputData(currentLettersBuffer, event.timestamp, timeDeltaBetweenKeysBuffer)
+                    DataHelpers::stringifyInputData(currentLettersBuffer, event.timestamp, timeDeltaBetweenKeysBuffer),
+                    KeyboardConfig::Tables::Inputs
                 );
                 currentLettersBuffer.clear();
             }
 
             else if (delta > 5000000 && !currentLettersBuffer.isEmpty() && !pendingSpace) {
                  DatabaseManager::getInstance().saveData(
-                    DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer)
+                    DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer),
+                    KeyboardConfig::Tables::Inputs
                  );
                  currentLettersBuffer.clear();
                  timeDeltaBetweenKeysBuffer.clear();
@@ -66,7 +70,8 @@ void InputHandlerFunc() {
             else if (KeyHelper::isLetterOrNumber(event.key)) {
                 if (pendingSpace) {
                     DatabaseManager::getInstance().saveData(
-                        DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer)
+                        DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer),
+                        KeyboardConfig::Tables::Inputs
                     );
                     currentLettersBuffer.clear();
                     timeDeltaBetweenKeysBuffer.clear();
@@ -95,7 +100,8 @@ void InputHandlerFunc() {
             else if (KeyHelper::isEnter(event.key)) {
                 if (!currentLettersBuffer.isEmpty()) {
                     DatabaseManager::getInstance().saveData(
-                        DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer)
+                        DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer),
+                        KeyboardConfig::Tables::Inputs
                     );
                     currentLettersBuffer.clear();
                     timeDeltaBetweenKeysBuffer.clear();

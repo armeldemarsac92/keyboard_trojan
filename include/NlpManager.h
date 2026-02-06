@@ -1,84 +1,44 @@
-#ifndef NLP_MANAGER_H
-#define NLP_MANAGER_H
+#ifndef NLPMANAGER_H
+#define NLPMANAGER_H
 
 #include <Arduino.h>
 #include <TeensyThreads.h>
 
-/**
- * NlpManager - Neural Network-based NLP for Teensy 4.1
- *
- * Features:
- * - Multi-word context hashing (bigrams, trigrams)
- * - Character n-grams for typo tolerance
- * - Positional encoding for sentence structure
- * - Thread-safe operation
- * - Confidence scoring
- */
-
-typedef void (*NlpCallback)(String topic, float confidence);
-
 class NlpManager {
 public:
-    void setCallback(NlpCallback cb) { _callback = cb; }
     static NlpManager& getInstance();
 
-    /**
-     * Initialize the NLP manager and start processing thread
-     */
     void begin();
-
-    /**
-     * Queue a sentence for analysis (thread-safe)
-     * @param sentence The text to analyze
-     */
     void analyzeSentence(String sentence);
+    void setCallback(void (*callback)(String topic, float confidence)) {
+        _callback = callback;
+    }
+
+    // 🔍 Debug function - call this to verify hash compatibility
+    void debugHashVerification();
+    void debugPrediction(String text); // New: detailed prediction debug
 
 private:
-    NlpCallback _callback = nullptr;
-    NlpManager() : _hasNewData(false) {}
+    NlpManager() : _hasNewData(false), _callback(nullptr) {}
     NlpManager(const NlpManager&) = delete;
     NlpManager& operator=(const NlpManager&) = delete;
 
-    // Thread-safe data exchange
-    String _inputBuffer;
-    bool _hasNewData;
-    Threads::Mutex _mutex;
-
-    /**
-     * Background processing thread
-     */
     static void processingThread(void* arg);
+    int predict_topic(String text, float* out_confidence);
 
-    /**
-     * MurmurHash3 32-bit hash function
-     * @param key Data to hash
-     * @param len Length of data
-     * @param seed Hash seed (default 0)
-     * @return 32-bit hash value
-     */
-    static uint32_t murmurhash3_32(const char *key, uint32_t len, uint32_t seed);
-
-    /**
-     * ReLU activation function
-     * @param x Input value
-     * @return max(0, x)
-     */
+    // Core NLP functions
+    static uint32_t murmurhash3_32(const char* key, uint32_t len, uint32_t seed);
     static float relu(float x);
+    static float activation_func(float x); // Support both relu and tanh
+    static void normalize_and_lower(char* str);
+    void hashAndAccumulate(const char* token, float* hidden1, int weight);
+    void softmax(float* values, int size);
 
-    /**
-     * Hash a token and accumulate to hidden layer
-     * @param token Token string to hash
-     * @param hidden1 Hidden layer to accumulate to
-     */
-    void hashAndAccumulate(const char* token, float* hidden1);
-
-    /**
-     * Predict topic from text using neural network
-     * @param text Input text
-     * @param out_confidence Optional output parameter for confidence score
-     * @return Index of predicted topic (use TOPICS[] to get label)
-     */
-    int predict_topic(String text, float* out_confidence = nullptr);
+    // Thread synchronization
+    Threads::Mutex _mutex;
+    volatile bool _hasNewData;
+    String _inputBuffer;
+    void (*_callback)(String topic, float confidence);
 };
 
-#endif // NLP_MANAGER_H
+#endif // NLPMANAGER_H

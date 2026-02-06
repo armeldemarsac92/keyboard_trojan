@@ -11,6 +11,10 @@
 #include <TeensyThreads.h> // for Threads::Mutex
 #include "ArduinoSQLiteHandler.h"
 
+namespace KeyboardConfig {
+    struct NodeInfo;
+}
+
 class DatabaseManager {
 private:
     std::vector<std::string> pendingStatements;
@@ -21,12 +25,16 @@ private:
 
     DatabaseManager();
 
+    void getData(const std::function<void(sqlite3_stmt*)>& callback, const DBTable& table);
+
+
 public:
     DatabaseManager(const DatabaseManager&) = delete;
     void operator=(const DatabaseManager&) = delete;
 
     static DatabaseManager& getInstance();
-
-    void saveData(const std::vector<std::string>& data);
+    void cleanupDuplicates();
+    std::vector<KeyboardConfig::NodeInfo> getRadioNodes();
+    void saveData(const std::vector<std::string>& data, const DBTable& table);
     void processQueue();
 };

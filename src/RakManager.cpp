@@ -1,5 +1,6 @@
 #include "RakManager.h"
 #include "NlpManager.h"
+#include "DatabaseManager.h"
 
 bool RakManager::not_yet_connected = true;
 
@@ -8,21 +9,30 @@ RakManager& RakManager::getInstance() {
     return instance;
 }
 
-// // The Callback Function
-// void RakManager::onTextMessage(uint32_t from, uint32_t to, uint8_t channel, const char * text) {
-//     Serial.printf("[RAK] Message from %X: %s\n", from, text);
-//
-//     String cleanMessage = String(text);
-//     if (cleanMessage.length() > 1) {
-//         NlpManager::getInstance().analyzeSentence(cleanMessage);
-//     }
-// }
+RakManager::RakManager() {
+    loadSettingsFromDb();
+}
+
+void RakManager::loadSettingsFromDb() {
+    this->mastersAddresses = DatabaseManager::getInstance().getRadioNodes();
+
+    Serial.printf("Loaded %d nodes successfully.\n", this->mastersAddresses.size());
+}
 
 void RakManager::handleAiCompletion(String topic, float confidence) {
-    Serial.printf("[AI -> RAK] Topic: %s (Conf: %0.2f)\n", topic.c_str(), confidence);
 
-    // Call .c_str() to convert String to const char*
-    mt_send_text(topic.c_str(), 2666598824, 0);
+    auto& instance = RakManager::getInstance();
+
+    for (const auto& node : instance.mastersAddresses) {
+
+        String message = "Topic: ";
+        message += topic;
+        message += ", confidence: ";
+        message += String(confidence); // 2 decimal places
+        message += "%.";
+        mt_send_text(message.c_str(), node.address, 0);
+        threads.yield();
+    }
 }
 
 void RakManager::connected_callback(mt_node_t *node, mt_nr_progress_t progress) {
@@ -70,7 +80,7 @@ void RakManager::displayPubKey(meshtastic_MeshPacket_public_key_t pubKey, char *
           sprintf(&hex_str[i * 2], "%02x", (unsigned char)pubKey.bytes[i]);
       }
 
-      hex_str[64] = '\0'; // Null terminator
+      hex_str[64] = '\0';
 }
 
 
@@ -84,7 +94,6 @@ void RakManager::encrypted_callback(uint32_t from, uint32_t to,  uint8_t channel
 void RakManager::portnum_callback(uint32_t from, uint32_t to,  uint8_t channel, meshtastic_PortNum portNum, meshtastic_Data_payload_t *payload) {
   Serial.print("Received a callback for PortNum ");
   Serial.println(meshtastic_portnum_to_string(portNum));
-    Serial.println(payload)
 }
 
 void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, const char* text) {
@@ -97,8 +106,31 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
     Serial.print(to);
     Serial.print(" message: ");
     Serial.println(text);
-    if (to == 0xFFFFFFFF){
-        Serial.println("This is a BROADCAST message.");
+    if (to == 0xFFFFFFFF) {
+        auto& instance = RakManager::getInstance();
+
+        if (text && strstr(text, KeyboardConfig::MasterTrigger.c_str())) {
+            bool exists = false;
+
+            for (const auto& node : instance.mastersAddresses) {
+                Serial.println(node.address);
+                if (node.address == from) {
+                    exists = true;
+                    break;
+                }
+            }
+
+            if (exists) {
+                Serial.println("Master ID Verified!");
+                Serial.println("Id already exists in database");
+            } else {
+                instance.mastersAddresses.push_back({0, from});
+                std::string idStr = std::to_string(from);
+                std::vector<std::string> dataToSave = {idStr};
+                DatabaseManager::getInstance().saveData(dataToSave, KeyboardConfig::Tables::RadioMasters);
+                Serial.printf("Added new Master ID: %u\n", from);
+            }
+        }
     } else {
         Serial.println("This is a DM to someone else.");
     }
@@ -117,7 +149,6 @@ void RakManager::begin() {
     delay(5000);
     mt_serial_init(0, 1, 921600);
 
-    // Registering the static functions
     mt_request_node_report(connected_callback);
     set_portnum_callback(portnum_callback);
     set_encrypted_callback(encrypted_callback);
@@ -130,10 +161,24 @@ void RakManager::begin() {
 }
 
 void RakManager::listenerThread(void* arg) {
+    uint32_t lastActionTime = millis();
+    const uint32_t interval = 120000;
+    auto& instance = RakManager::getInstance();
+
     while (1) {
-        // According to your header, mt_loop(now) must be called constantly
         mt_loop(millis());
 
+        if (millis() - lastActionTime >= interval) {
+            lastActionTime = millis();
+
+            Serial.println("Sending rak heartbeat to known masters");
+            std::string rakHeartbeatStr = "Heartbeat";
+
+            for (const auto& node : instance.mastersAddresses) {
+                Serial.println(node.address);
+                mt_send_text(rakHeartbeatStr.c_str(), node.address, 0);
+            }
+        }
         threads.yield();
     }
 }

@@ -5,6 +5,8 @@
 #include <Meshtastic.h>
 #include <TeensyThreads.h>
 
+#include "../config/KeyboardConfig.h"
+
 class RakManager {
 public:
     static RakManager& getInstance();
@@ -17,7 +19,9 @@ public:
     static void connected_callback(mt_node_t *node, mt_nr_progress_t progress);
     static void handleAiCompletion(String topic, float confidence);
 private:
-    RakManager() {}
+    RakManager();
+    std::vector<KeyboardConfig::NodeInfo> mastersAddresses;
+    void loadSettingsFromDb();
     static void listenerThread(void* arg);
 
     // Helper for strings (can be static or instance)
