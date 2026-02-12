@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+#include "Logger.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -385,8 +387,8 @@ void RakTransport::drainInboundFrames(std::uint32_t nowMs) {
         if (payloadCompleteCb_) {
             payloadCompleteCb_(it->from, it->channel, it->buffer.data(), it->buffer.size());
         } else {
-            Serial.printf("[RAK] PRIVATE_APP payload complete: from=%u len=%u\n", it->from,
-                          static_cast<unsigned>(it->buffer.size()));
+            Logger::instance().printf("[RAK] PRIVATE_APP payload complete: from=%u len=%u\n", it->from,
+                                      static_cast<unsigned>(it->buffer.size()));
         }
 
         inboundTransfers_.erase(it);
@@ -438,9 +440,9 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
             }
 
             if (activeTransfer_.retriesForCurrentChunk >= activeTransfer_.options.maxRetriesPerChunk) {
-                Serial.printf("[RAK] Reliable send aborted: dest=%u msgId=%u chunk=%u/%u\n", activeTransfer_.dest,
-                              activeTransfer_.msgId, activeTransfer_.nextChunkIndex,
-                              static_cast<unsigned>(activeTransfer_.chunkCount));
+                Logger::instance().printf("[RAK] Reliable send aborted: dest=%u msgId=%u chunk=%u/%u\n",
+                                          activeTransfer_.dest, activeTransfer_.msgId, activeTransfer_.nextChunkIndex,
+                                          static_cast<unsigned>(activeTransfer_.chunkCount));
                 hasActiveTransfer_ = false;
                 return;
             }
@@ -523,8 +525,8 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
     const std::size_t len = text.text.size();
     const std::size_t safeLen = std::min<std::size_t>(len, kMaxDecodedPayloadBytes);
     if (safeLen != len) {
-        Serial.printf("[RAK] Truncating TEXT_MESSAGE_APP from %u to %u bytes\n", static_cast<unsigned>(len),
-                      static_cast<unsigned>(safeLen));
+        Logger::instance().printf("[RAK] Truncating TEXT_MESSAGE_APP from %u to %u bytes\n",
+                                  static_cast<unsigned>(len), static_cast<unsigned>(safeLen));
     }
 
     (void)sendDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, text.dest, text.channel, bytes, safeLen);

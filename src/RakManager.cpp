@@ -1,5 +1,6 @@
 #include "RakManager.h"
 #include "DatabaseManager.h"
+#include "Logger.h"
 #include "NlpManager.h"
 
 #include <algorithm>
@@ -78,7 +79,7 @@ void RakManager::loadSettingsFromDb() {
         mastersAddresses = loaded;
     }
 
-    Serial.printf("Loaded %u nodes successfully.\n", static_cast<unsigned>(loaded.size()));
+    Logger::instance().printf("Loaded %u nodes successfully.\n", static_cast<unsigned>(loaded.size()));
 }
 
 void RakManager::sendReliable(uint32_t dest, uint8_t channel, std::vector<std::uint8_t> payload) {
@@ -122,8 +123,9 @@ void RakManager::connected_callback(mt_node_t *node, mt_nr_progress_t progress) 
     (void)node;
     (void)progress;
 
-    if (not_yet_connected)
-        Serial.println("Connected to Meshtastic device!");
+    if (not_yet_connected) {
+        Logger::instance().println("Connected to Meshtastic device!");
+    }
     not_yet_connected = false;
 }
 
@@ -175,29 +177,29 @@ void RakManager::encrypted_callback(uint32_t from, uint32_t to,  uint8_t channel
   (void)pubKey;
   (void)enc_payload;
 
-  Serial.print("Received an ENCRYPTED callback from: ");
-  Serial.print(from);
-  Serial.print(" to: ");
-  Serial.println(to);
+  Logger::instance().print("Received an ENCRYPTED callback from: ");
+  Logger::instance().print(from);
+  Logger::instance().print(" to: ");
+  Logger::instance().println(to);
 }
 
 void RakManager::portnum_callback(uint32_t from, uint32_t to,  uint8_t channel, meshtastic_PortNum portNum, meshtastic_Data_payload_t *payload) {
     auto& instance = RakManager::getInstance();
     instance.transport_.onPortnumPacket(from, to, channel, portNum, payload);
 
-    Serial.print("Received a callback for PortNum ");
-    Serial.println(meshtastic_portnum_to_string(portNum));
+    Logger::instance().print("Received a callback for PortNum ");
+    Logger::instance().println(meshtastic_portnum_to_string(portNum));
 }
 
 void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, const char* text) {
-    Serial.print("Received a text message on channel: ");
-    Serial.print(channel);
-    Serial.print(" from: ");
-    Serial.print(from);
-    Serial.print(" to: ");
-    Serial.print(to);
-    Serial.print(" message: ");
-    Serial.println(text ? text : "<null>");
+    Logger::instance().print("Received a text message on channel: ");
+    Logger::instance().print(channel);
+    Logger::instance().print(" from: ");
+    Logger::instance().print(from);
+    Logger::instance().print(" to: ");
+    Logger::instance().print(to);
+    Logger::instance().print(" message: ");
+    Logger::instance().println(text ? text : "<null>");
 
     if (text == nullptr) {
         return;
@@ -210,12 +212,12 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
         std::string suppliedSecret;
         if (tryExtractEnrollmentSecret(text, suppliedSecret)) {
             if (!isEnrollmentSecretConfigured()) {
-                Serial.println("[RAK] Enrollment disabled: set a strong MasterEnrollmentSecret in KeyboardConfig.");
+                Logger::instance().println("[RAK] Enrollment disabled: set a strong MasterEnrollmentSecret in KeyboardConfig.");
                 return;
             }
 
             if (!constantTimeEquals(suppliedSecret, KeyboardConfig::Security::MasterEnrollmentSecret)) {
-                Serial.printf("[RAK] Enrollment rejected for node %u: invalid credentials.\n", from);
+                Logger::instance().printf("[RAK] Enrollment rejected for node %u: invalid credentials.\n", from);
                 return;
             }
 
@@ -238,10 +240,10 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             }
 
             if (alreadyEnrolled) {
-                Serial.printf("[RAK] Node %u is already enrolled as master.\n", from);
+                Logger::instance().printf("[RAK] Node %u is already enrolled as master.\n", from);
             } else if (added) {
                 DatabaseManager::getInstance().saveData({std::to_string(from)}, KeyboardConfig::Tables::RadioMasters);
-                Serial.printf("[RAK] Added new master node: %u\n", from);
+                Logger::instance().printf("[RAK] Added new master node: %u\n", from);
             }
             return;
         }
@@ -260,7 +262,7 @@ void RakManager::begin() {
     pinMode(0, INPUT);
     pinMode(1, INPUT);
 
-    Serial.println("[RAK] Manager Init: Waiting 3 seconds for module to boot...");
+    Logger::instance().println("[RAK] Manager Init: Waiting 3 seconds for module to boot...");
     delay(kBootDelayMs);
     mt_serial_init(0, 1, kRakSerialBaudRate);
 
@@ -272,13 +274,13 @@ void RakManager::begin() {
     NlpManager::getInstance().setCallback(RakManager::handleAiCompletion);
     transport_.setPayloadCompleteCallback(onPrivatePayloadComplete);
 
-    Serial.println("[RAK] Manager Init with Callback System...");
+    Logger::instance().println("[RAK] Manager Init with Callback System...");
     threads.addThread(listenerThread, nullptr, 4096);
 }
 
 void RakManager::onPrivatePayloadComplete(uint32_t from, uint8_t channel, const std::uint8_t* bytes, std::size_t len) {
-    Serial.printf("[RAK] PRIVATE_APP payload complete: from=%u channel=%u len=%u\n", from, channel,
-                  static_cast<unsigned>(len));
+    Logger::instance().printf("[RAK] PRIVATE_APP payload complete: from=%u channel=%u len=%u\n", from, channel,
+                              static_cast<unsigned>(len));
     (void)bytes;
 }
 
@@ -297,7 +299,7 @@ void RakManager::listenerThread(void* arg) {
         if (now - lastActionTime >= kHeartbeatIntervalMs) {
             lastActionTime = now;
 
-            Serial.println("Sending rak heartbeat to known masters");
+            Logger::instance().println("Sending rak heartbeat to known masters");
 
             std::vector<KeyboardConfig::NodeInfo> mastersSnapshot;
             {
@@ -306,7 +308,7 @@ void RakManager::listenerThread(void* arg) {
             }
 
             for (const auto& node : mastersSnapshot) {
-                Serial.println(node.address);
+                Logger::instance().println(node.address);
                 instance.transport_.enqueueText(static_cast<std::uint32_t>(node.address), 0, kHeartbeatText);
             }
         }

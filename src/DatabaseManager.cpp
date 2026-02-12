@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "ArduinoSQLiteHandler.h"
+#include "Logger.h"
 #include "usb_serial.h"
 #include "../config/KeyboardConfig.h"
 
@@ -41,7 +42,7 @@ void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback
 
     const int rc = sqlite3_prepare_v2(dbConnection, query.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        Serial.printf("Database Read Error: %s\n", sqlite3_errmsg(dbConnection));
+        Logger::instance().printf("Database Read Error: %s\n", sqlite3_errmsg(dbConnection));
         return;
     }
 
@@ -61,8 +62,8 @@ void DatabaseManager::saveData(const std::vector<std::string>& data, const DBTab
     Threads::Scope scope(queueMutex);
     pendingStatements.push_back(sqlStatement);
 
-    Serial.print("QUEUED: ");
-    Serial.println(data[0].c_str());
+    Logger::instance().print("QUEUED: ");
+    Logger::instance().println(data[0].c_str());
 }
 
 void DatabaseManager::processQueue() {

@@ -8,6 +8,7 @@
 #include "DatabaseManager.h"
 #include "InputHandler.h"
 #include "KeyHandlers.h"
+#include "Logger.h"
 #include "NlpManager.h"
 #include "RakManager.h"
 
@@ -26,9 +27,9 @@ extern "C" {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Logger::instance().begin(115200);
   // while (!Serial);
-  Serial.println("\n\nUSB Keyboard Forwarder (Modular)");
+  Logger::instance().println("\n\nUSB Keyboard Forwarder (Modular)");
 
   DatabaseManager::getInstance();
 
@@ -73,9 +74,9 @@ void loop() {
 
     // Debugging: Print exactly what we received
     /*
-    Serial.print("Len: "); Serial.println(custom_feature_len_received);
-    Serial.print("Byte[0]: "); Serial.println(custom_feature_buffer[0], HEX);
-    Serial.print("Byte[1]: "); Serial.println(custom_feature_buffer[1], HEX);
+    Logger::instance().print("Len: "); Logger::instance().println(custom_feature_len_received);
+    Logger::instance().print("Byte[0]: "); Logger::instance().println(custom_feature_buffer[0], HEX);
+    Logger::instance().print("Byte[1]: "); Logger::instance().println(custom_feature_buffer[1], HEX);
     */
 
     delay(10);

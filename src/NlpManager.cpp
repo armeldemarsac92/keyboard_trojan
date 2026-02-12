@@ -1,5 +1,6 @@
 #include "NlpManager.h"
 #include "ModelWeights.h"
+#include "Logger.h"
 #include <cstring>
 #include <cmath>
 
@@ -9,25 +10,25 @@ NlpManager& NlpManager::getInstance() {
 }
 
 void NlpManager::begin() {
-    Serial.println(F("\n========================================"));
-    Serial.println(F("   AI Neural Network Initialization"));
-    Serial.println(F("========================================"));
-    Serial.printf("Input Size:      %d\n", INPUT_SIZE);
-    Serial.printf("Hidden Layer 1:  %d\n", HIDDEN1_SIZE);
-    Serial.printf("Hidden Layer 2:  %d\n", HIDDEN2_SIZE);
-    Serial.printf("Output Classes:  %d\n", OUTPUT_SIZE);
-    Serial.println(F("----------------------------------------"));
-    Serial.printf("Feature Weights:\n");
-    Serial.printf("  W_CHAR:  %d\n", FeatureParams::W_CHAR);
-    Serial.printf("  W_WORD:  %d\n", FeatureParams::W_WORD);
-    Serial.printf("  W_BI:    %d\n", FeatureParams::W_BI);
-    Serial.printf("  W_TRI:   %d\n", FeatureParams::W_TRI);
-    Serial.printf("  W_POS:   %d\n", FeatureParams::W_POS);
-    Serial.printf("Char n-gram: [%d, %d]\n", FeatureParams::CHAR_MIN, FeatureParams::CHAR_MAX);
-    Serial.println(F("========================================\n"));
+    Logger::instance().println(F("\n========================================"));
+    Logger::instance().println(F("   AI Neural Network Initialization"));
+    Logger::instance().println(F("========================================"));
+    Logger::instance().printf("Input Size:      %d\n", INPUT_SIZE);
+    Logger::instance().printf("Hidden Layer 1:  %d\n", HIDDEN1_SIZE);
+    Logger::instance().printf("Hidden Layer 2:  %d\n", HIDDEN2_SIZE);
+    Logger::instance().printf("Output Classes:  %d\n", OUTPUT_SIZE);
+    Logger::instance().println(F("----------------------------------------"));
+    Logger::instance().printf("Feature Weights:\n");
+    Logger::instance().printf("  W_CHAR:  %d\n", FeatureParams::W_CHAR);
+    Logger::instance().printf("  W_WORD:  %d\n", FeatureParams::W_WORD);
+    Logger::instance().printf("  W_BI:    %d\n", FeatureParams::W_BI);
+    Logger::instance().printf("  W_TRI:   %d\n", FeatureParams::W_TRI);
+    Logger::instance().printf("  W_POS:   %d\n", FeatureParams::W_POS);
+    Logger::instance().printf("Char n-gram: [%d, %d]\n", FeatureParams::CHAR_MIN, FeatureParams::CHAR_MAX);
+    Logger::instance().println(F("========================================\n"));
 
     threads.addThread(processingThread, this, 32768);
-    Serial.println(F("[AI] Processing thread started."));
+    Logger::instance().println(F("[AI] Processing thread started."));
 }
 
 void NlpManager::analyzeSentence(String sentence) {
@@ -379,7 +380,7 @@ int NlpManager::predict_topic(String text, float* out_confidence) {
 // ============================================
 
 void NlpManager::debugHashVerification() {
-    Serial.println(F("\n=== HASH VERIFICATION TEST ==="));
+    Logger::instance().println(F("\n=== HASH VERIFICATION TEST ==="));
 
     const char* test_tokens[] = {
         "C_<bo", "C_bon", "C_onj", "C_njo",
@@ -395,28 +396,28 @@ void NlpManager::debugHashVerification() {
         int index = abs_h % INPUT_SIZE;
         float sign = (signed_h < 0) ? -1.0f : 1.0f;
 
-        Serial.printf("%-25s | %10u | %+2.0f | %5d\n", token, h, sign, index);
+        Logger::instance().printf("%-25s | %10u | %+2.0f | %5d\n", token, h, sign, index);
     }
 
-    Serial.println(F("\n=== Normalization Test ==="));
+    Logger::instance().println(F("\n=== Normalization Test ==="));
     char test1[] = "Bonjour ça va?";
     char test2[] = "ÉLÉPHANT";
 
     normalize_and_lower(test1);
     normalize_and_lower(test2);
 
-    Serial.printf("\"Bonjour ça va?\" -> \"%s\"\n", test1);
-    Serial.printf("\"ÉLÉPHANT\" -> \"%s\"\n", test2);
-    Serial.println(F("=== END ===\n"));
+    Logger::instance().printf("\"Bonjour ça va?\" -> \"%s\"\n", test1);
+    Logger::instance().printf("\"ÉLÉPHANT\" -> \"%s\"\n", test2);
+    Logger::instance().println(F("=== END ===\n"));
 }
 
 void NlpManager::debugPrediction(String text) {
-    Serial.println(F("\n=== PREDICTION DEBUG ==="));
-    Serial.printf("Input: \"%s\"\n\n", text.c_str());
+    Logger::instance().println(F("\n=== PREDICTION DEBUG ==="));
+    Logger::instance().printf("Input: \"%s\"\n\n", text.c_str());
 
     float confidence = 0.0f;
     int topicIdx = predict_topic(text, &confidence);
 
-    Serial.printf("Result: %s (%.2f%%)\n", CATEGORIES[topicIdx], confidence);
-    Serial.println(F("=== END ===\n"));
+    Logger::instance().printf("Result: %s (%.2f%%)\n", CATEGORIES[topicIdx], confidence);
+    Logger::instance().println(F("=== END ===\n"));
 }

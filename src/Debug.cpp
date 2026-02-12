@@ -5,6 +5,7 @@
 
 #include "Debug.h"
 #include "Globals.h"
+#include "Logger.h"
 
 namespace {
 std::array<USBDriver*, 4> drivers{&hub1, &hub2, &hid1, &hid2};
@@ -23,10 +24,10 @@ void ShowUpdatedDeviceListInfo() {
   for (std::size_t i = 0; i < drivers.size(); ++i) {
     if (*drivers[i] != driverActive[i]) {
       if (driverActive[i]) {
-        Serial.printf("*** Device %s - disconnected ***\n", driverNames[i]);
+        Logger::instance().printf("*** Device %s - disconnected ***\n", driverNames[i]);
         driverActive[i] = false;
       } else {
-        Serial.printf("*** Device %s %x:%x - connected ***\n", driverNames[i], drivers[i]->idVendor(), drivers[i]->idProduct());
+        Logger::instance().printf("*** Device %s %x:%x - connected ***\n", driverNames[i], drivers[i]->idVendor(), drivers[i]->idProduct());
         driverActive[i] = true;
       }
     }
@@ -36,11 +37,11 @@ void ShowUpdatedDeviceListInfo() {
   for (std::size_t i = 0; i < hidDrivers.size(); ++i) {
     if (*hidDrivers[i] != hidDriverActive[i]) {
       if (hidDriverActive[i]) {
-        Serial.printf("*** HID Device %s - disconnected ***\n", hidDriverNames[i]);
+        Logger::instance().printf("*** HID Device %s - disconnected ***\n", hidDriverNames[i]);
         hidDriverActive[i] = false;
         digitalWrite(13, LOW);
       } else {
-        Serial.printf("*** HID Device %s %x:%x - connected ***\n", hidDriverNames[i], hidDrivers[i]->idVendor(), hidDrivers[i]->idProduct());
+        Logger::instance().printf("*** HID Device %s %x:%x - connected ***\n", hidDriverNames[i], hidDrivers[i]->idVendor(), hidDrivers[i]->idProduct());
         hidDriverActive[i] = true;
         digitalWrite(13, HIGH);
       }
@@ -51,16 +52,16 @@ void ShowUpdatedDeviceListInfo() {
 
 void PrintKeyPress(uint8_t keycode, bool mapped) {
 #ifdef SHOW_KEYBOARD_DATA
-  Serial.print("Press: ");
-  Serial.print(keycode, HEX);
-  if (mapped) Serial.print(" [Mapped Modifier]");
-  Serial.println();
+  Logger::instance().print("Press: ");
+  Logger::instance().print(keycode, HEX);
+  if (mapped) Logger::instance().print(" [Mapped Modifier]");
+  Logger::instance().println();
 #endif
 }
 
 void PrintKeyRelease(uint8_t keycode) {
 #ifdef SHOW_KEYBOARD_DATA
-  Serial.print("Release: ");
-  Serial.println(keycode, HEX);
+  Logger::instance().print("Release: ");
+  Logger::instance().println(keycode, HEX);
 #endif
 }
