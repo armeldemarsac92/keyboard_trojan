@@ -210,12 +210,15 @@ bool executeInsertTransaction(sqlite3* db, const Inserts& inserts) {
         return false;
     }
 
-    std::vector<PreparedInsertStmt> prepared;
-    prepared.reserve(2);  // common case: Inputs + RadioMasters
+	    std::vector<PreparedInsertStmt> prepared;
+	    prepared.reserve(2);  // common case: Inputs + RadioMasters
 
-    auto rollback = [&]() {
-        (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    };
+	    auto rollback = [&]() {
+	        // Some failures (e.g. OOM opening the journal) may leave us in autocommit mode, making ROLLBACK noisy.
+	        if (sqlite3_get_autocommit(db) == 0) {
+	            (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+	        }
+	    };
 
     for (const auto& ins : inserts) {
         if (ins.table == nullptr) {
@@ -612,25 +615,51 @@ void DatabaseManager::processQueue() {
         }
     }
 
-    if (!batchToSave.empty()) {
-        const bool ok = [&]() {
-            Threads::Scope dbLock(dbMutex_);
-            return executeInsertTransaction(dbConnection, batchToSave);
-        }();
+	    if (!batchToSave.empty()) {
+	        const bool ok = [&]() {
+	            Threads::Scope dbLock(dbMutex_);
+	            return executeInsertTransaction(dbConnection, batchToSave);
+	        }();
 
-        if (!ok) {
-            Logger::instance().println("[DB] Transaction failed, re-queueing rows.");
-            Threads::Scope scope(queueMutex);
-            pendingInserts_.insert(pendingInserts_.end(),
-                                   std::make_move_iterator(batchToSave.begin()),
-                                   std::make_move_iterator(batchToSave.end()));
-            lastFailureTime = now;
-        } else {
-            lastFailureTime = 0;
-        }
-        lastWriteTime = now;
-        return;
-    }
+	        if (!ok) {
+	            Logger::instance().println("[DB] Transaction failed, re-queueing rows.");
+	            Threads::Scope scope(queueMutex);
+	            pendingInserts_.insert(pendingInserts_.end(),
+	                                   std::make_move_iterator(batchToSave.begin()),
+	                                   std::make_move_iterator(batchToSave.end()));
+	            lastFailureTime = now;
+	        } else {
+	            lastFailureTime = 0;
+
+	            std::size_t inputsCount = 0;
+	            std::size_t mastersCount = 0;
+	            std::size_t otherCount = 0;
+	            for (const auto& ins : batchToSave) {
+	                if (ins.table == &KeyboardConfig::Tables::Inputs) {
+	                    ++inputsCount;
+	                } else if (ins.table == &KeyboardConfig::Tables::RadioMasters) {
+	                    ++mastersCount;
+	                } else {
+	                    ++otherCount;
+	                }
+	            }
+
+	            std::size_t pending = 0;
+	            {
+	                Threads::Scope scope(queueMutex);
+	                pending = pendingInserts_.size();
+	            }
+
+	            Logger::instance().printf("[DB] Committed %u insert(s) (Inputs=%u Masters=%u Other=%u). Pending=%u\n",
+	                                      static_cast<unsigned>(batchToSave.size()),
+	                                      static_cast<unsigned>(inputsCount),
+	                                      static_cast<unsigned>(mastersCount),
+	                                      static_cast<unsigned>(otherCount),
+	                                      static_cast<unsigned>(pending));
+	        }
+	        lastWriteTime = now;
+	        return;
+	    }
 
     // No writes this tick. Optionally migrate legacy timestamps in small chunks.
     const bool backoffActive = (lastFailureTime != 0U) && (now - lastFailureTime < kFailureBackoffMs);
