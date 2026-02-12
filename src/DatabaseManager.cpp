@@ -2,11 +2,63 @@
 
 #include <Arduino.h>
 #include <cstdint>
+#include <string_view>
 
 #include "ArduinoSQLiteHandler.h"
 #include "Logger.h"
 #include "usb_serial.h"
 #include "../config/KeyboardConfig.h"
+
+namespace {
+bool isTextColumnType(const std::string& columnType) {
+    return columnType.find("TEXT") != std::string::npos;
+}
+
+// Escape for SQL string literals: ' => ''.
+// This is the minimal fix to avoid malformed INSERT statements when user input contains apostrophes.
+std::string escapeSqlStringLiteral(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+
+    for (const char c : value) {
+        if (c == '\'') {
+            escaped.push_back('\'');
+            escaped.push_back('\'');
+        } else if (c == '\0') {
+            // sqlite3_exec() uses C-strings and would truncate at NUL anyway.
+            // Drop it to avoid embedding invisible truncation points.
+            continue;
+        } else {
+            escaped.push_back(c);
+        }
+    }
+
+    return escaped;
+}
+
+std::vector<std::string> escapeInsertData(const DBTable& table, const std::vector<std::string>& data) {
+    std::vector<std::string> escaped = data;
+    std::size_t dataIndex = 0;
+
+    for (const auto& col : table.columns) {
+        if (col.isPrimaryKey) {
+            continue;
+        }
+
+        if (dataIndex >= escaped.size()) {
+            break;
+        }
+
+        if (isTextColumnType(col.type)) {
+            escaped[dataIndex] = escapeSqlStringLiteral(escaped[dataIndex]);
+        }
+
+        ++dataIndex;
+    }
+
+    return escaped;
+}
+}  // namespace
 
 DatabaseManager::DatabaseManager() {
     setupDatabase();
@@ -56,7 +108,8 @@ void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback
 void DatabaseManager::saveData(const std::vector<std::string>& data, const DBTable& table) {
     if (data.empty()) return;
 
-    std::string sqlStatement = buildSQLInsertStatement(table, data);
+    const std::vector<std::string> escapedData = escapeInsertData(table, data);
+    std::string sqlStatement = buildSQLInsertStatement(table, escapedData);
     if (sqlStatement.empty()) return;
 
     Threads::Scope scope(queueMutex);
