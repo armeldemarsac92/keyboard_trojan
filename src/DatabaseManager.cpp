@@ -1,6 +1,7 @@
 #include "DatabaseManager.h"
 
 #include <Arduino.h>
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
@@ -303,33 +304,45 @@ bool executeInsertTransaction(sqlite3* db, const Inserts& inserts) {
     return true;
 }
 
-void migrateInputTimestampsToSeconds(sqlite3* db) {
-    if (db == nullptr) {
-        return;
+int migrateInputTimestampsToSecondsStep(sqlite3* db, std::size_t maxRows) {
+    if (db == nullptr || maxRows == 0) {
+        return 0;
     }
 
     // Historical rows used to store `micros()` directly (microseconds). We now store seconds.
     // `micros()` is a 32-bit counter (wraps at ~4294 seconds), therefore any timestamp >10k cannot be valid
     // seconds-based data and is safe to convert from microseconds.
-    const std::string sql = "UPDATE " + KeyboardConfig::Tables::Inputs.tableName +
-                            " SET Timestamp = CAST(Timestamp AS REAL) / 1000000.0"
-                            " WHERE CAST(Timestamp AS REAL) > 10000.0;";
+    const std::string sql =
+        "UPDATE " + KeyboardConfig::Tables::Inputs.tableName +
+        " SET Timestamp = CAST(Timestamp AS REAL) / 1000000.0"
+        " WHERE rowid IN ("
+        "   SELECT rowid FROM " + KeyboardConfig::Tables::Inputs.tableName +
+        "   WHERE CAST(Timestamp AS REAL) > 10000.0"
+        "   LIMIT " + std::to_string(maxRows) +
+        " );";
 
     char* errMsg = nullptr;
     const int rc = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &errMsg);
     if (rc != SQLITE_OK) {
         Logger::instance().printf("[DB] Timestamp migration failed: %s\n", errMsg ? errMsg : "<null>");
         sqlite3_free(errMsg);
+        return -1;
     }
+
+    return sqlite3_changes(db);
 }
 }  // namespace
 
 DatabaseManager::DatabaseManager() {
     setupDatabase();
     dbConnection = createOpenSQLConnection(KeyboardConfig::DBName.data());
-    createSQLTable(dbConnection, KeyboardConfig::Tables::Inputs);
-    createSQLTable(dbConnection, KeyboardConfig::Tables::RadioMasters);
-    migrateInputTimestampsToSeconds(dbConnection);
+    dbAvailable_ = (dbConnection != nullptr);
+
+    if (dbAvailable_) {
+        const bool inputsOk = createSQLTable(dbConnection, KeyboardConfig::Tables::Inputs);
+        const bool mastersOk = createSQLTable(dbConnection, KeyboardConfig::Tables::RadioMasters);
+        dbAvailable_ = inputsOk && mastersOk;
+    }
 }
 
 DatabaseManager& DatabaseManager::getInstance() {
@@ -350,9 +363,11 @@ std::vector<KeyboardConfig::NodeInfo> DatabaseManager::getRadioNodes() {
 }
 
 void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback, const DBTable& table) {
-    if (!dbConnection) return;
+    if (!dbConnection || !dbAvailable_) {
+        return;
+    }
 
-    Threads::Scope scope(queueMutex);
+    Threads::Scope scope(dbMutex_);
 
     const std::string query = "SELECT * FROM " + table.tableName + ";";
     sqlite3_stmt* stmt = nullptr;
@@ -375,45 +390,84 @@ void DatabaseManager::saveData(std::vector<std::string> data, const DBTable& tab
         return;
     }
 
+    if (!dbAvailable_) {
+        // Keep keyboard responsive even if the SD/DB is missing by dropping rows.
+        static bool warned = false;
+        if (!warned) {
+            Logger::instance().println("[DB] Database unavailable. Dropping rows.");
+            warned = true;
+        }
+        return;
+    }
+
     PendingInsert pending;
     pending.table = &table;
     pending.values = std::move(data);
 
     Threads::Scope scope(queueMutex);
+    constexpr std::size_t kMaxPendingInserts = 500;
+    if (pendingInserts_.size() >= kMaxPendingInserts) {
+        static bool warnedQueueFull = false;
+        if (!warnedQueueFull) {
+            Logger::instance().println("[DB] Insert queue full. Dropping rows.");
+            warnedQueueFull = true;
+        }
+        return;
+    }
     pendingInserts_.push_back(std::move(pending));
 }
 
 void DatabaseManager::processQueue() {
+    if (!dbConnection || !dbAvailable_) {
+        return;
+    }
+
     static std::uint32_t lastWriteTime = 0;
     static std::uint32_t lastFailureTime = 0;
+    static std::uint32_t lastMigrationTime = 0;
+    static bool migrationDone = false;
+    static bool migrationAnnounced = false;
     constexpr std::size_t kBatchSize = 20;
+    constexpr std::size_t kMaxBatchPerFlush = 50;
     constexpr std::uint32_t kMaxFlushDelayMs = 60'000;
     constexpr std::uint32_t kFailureBackoffMs = 5'000;
+    constexpr std::uint32_t kMigrationIntervalMs = 250;
+    constexpr std::size_t kMigrationChunkRows = 200;
 
     std::vector<PendingInsert> batchToSave;
+    bool queueEmpty = false;
+    const std::uint32_t now = millis();
 
     {
-        const std::uint32_t now = millis();
         Threads::Scope scope(queueMutex);
+        queueEmpty = pendingInserts_.empty();
 
         const bool backoffActive = (lastFailureTime != 0U) && (now - lastFailureTime < kFailureBackoffMs);
         const bool shouldWrite = (pendingInserts_.size() >= kBatchSize) ||
                                  (!pendingInserts_.empty() && (now - lastWriteTime > kMaxFlushDelayMs));
-        if (!shouldWrite || backoffActive) {
-            return;
-        }
 
-        batchToSave = std::move(pendingInserts_);
-        pendingInserts_.clear();
+        if (shouldWrite && !backoffActive) {
+            const std::size_t toFlush = std::min<std::size_t>(pendingInserts_.size(), kMaxBatchPerFlush);
+            batchToSave.reserve(toFlush);
+
+            const std::size_t startIndex = pendingInserts_.size() - toFlush;
+            for (std::size_t i = startIndex; i < pendingInserts_.size(); ++i) {
+                batchToSave.push_back(std::move(pendingInserts_[i]));
+            }
+            pendingInserts_.resize(startIndex);
+        }
     }
 
     if (!batchToSave.empty()) {
-        const std::uint32_t now = millis();
-        const bool ok = executeInsertTransaction(dbConnection, batchToSave);
+        const bool ok = [&]() {
+            Threads::Scope dbLock(dbMutex_);
+            return executeInsertTransaction(dbConnection, batchToSave);
+        }();
+
         if (!ok) {
             Logger::instance().println("[DB] Transaction failed, re-queueing rows.");
             Threads::Scope scope(queueMutex);
-            pendingInserts_.insert(pendingInserts_.begin(),
+            pendingInserts_.insert(pendingInserts_.end(),
                                    std::make_move_iterator(batchToSave.begin()),
                                    std::make_move_iterator(batchToSave.end()));
             lastFailureTime = now;
@@ -421,5 +475,30 @@ void DatabaseManager::processQueue() {
             lastFailureTime = 0;
         }
         lastWriteTime = now;
+        return;
+    }
+
+    // No writes this tick. Optionally migrate legacy timestamps in small chunks.
+    const bool backoffActive = (lastFailureTime != 0U) && (now - lastFailureTime < kFailureBackoffMs);
+    if (!migrationDone && !backoffActive && queueEmpty && (now - lastMigrationTime >= kMigrationIntervalMs)) {
+        lastMigrationTime = now;
+
+        if (!migrationAnnounced) {
+            Logger::instance().println("[DB] Migrating legacy timestamps to seconds...");
+            migrationAnnounced = true;
+        }
+
+        const int changed = [&]() {
+            Threads::Scope dbLock(dbMutex_);
+            return migrateInputTimestampsToSecondsStep(dbConnection, kMigrationChunkRows);
+        }();
+
+        if (changed == 0) {
+            migrationDone = true;
+            Logger::instance().println("[DB] Timestamp migration complete.");
+        } else if (changed < 0) {
+            // Avoid hammering the SD card on repeated failures.
+            lastFailureTime = now;
+        }
     }
 }

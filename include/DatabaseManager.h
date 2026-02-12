@@ -20,6 +20,8 @@ private:
     std::vector<PendingInsert> pendingInserts_;
     sqlite3* dbConnection = nullptr;
     Threads::Mutex queueMutex;
+    Threads::Mutex dbMutex_;
+    bool dbAvailable_ = false;
 
     DatabaseManager();
 
