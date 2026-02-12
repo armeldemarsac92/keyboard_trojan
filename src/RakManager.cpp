@@ -250,14 +250,18 @@ void logRoutingAppPacket(uint32_t from, uint32_t to, uint8_t channel, const mesh
         }
 
         case meshtastic_Routing_error_reason_tag: {
-            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=error pktId=%u reqId=%u pri=%s(%u) reason=%s(%d)\n",
+            const bool isAck = (routing.error_reason == meshtastic_Routing_Error_NONE);
+            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=%s pktId=%u reqId=%u pri=%s(%u) hop=%u/%u reason=%s(%d)\n",
                                       from,
                                       to,
                                       channel,
+                                      isAck ? "ack" : "error",
                                       pkt ? pkt->id : 0U,
                                       data ? data->request_id : 0U,
                                       pkt ? priorityToString(pkt->priority) : "UNKNOWN",
                                       pkt ? static_cast<unsigned>(pkt->priority) : 0U,
+                                      pkt ? static_cast<unsigned>(pkt->hop_limit) : 0U,
+                                      pkt ? static_cast<unsigned>(pkt->hop_start) : 0U,
                                       routingErrorToString(routing.error_reason),
                                       static_cast<int>(routing.error_reason));
             return;

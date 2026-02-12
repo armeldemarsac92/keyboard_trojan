@@ -154,7 +154,7 @@ bool canSendNow() {
 }
 
 bool sendDecodedPacket(meshtastic_PortNum portNum, uint32_t dest, uint8_t channel, const std::uint8_t* bytes,
-                       std::size_t len) {
+                       std::size_t len, std::uint32_t* outMeshPacketId = nullptr) {
     if (!canSendNow()) {
         return false;
     }
@@ -170,6 +170,9 @@ bool sendDecodedPacket(meshtastic_PortNum portNum, uint32_t dest, uint8_t channe
     meshtastic_MeshPacket meshPacket = meshtastic_MeshPacket_init_default;
     meshPacket.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
     meshPacket.id = random(0x7FFFFFFF);
+    if (outMeshPacketId != nullptr) {
+        *outMeshPacketId = meshPacket.id;
+    }
     meshPacket.decoded.portnum = portNum;
     meshPacket.to = dest;
     meshPacket.channel = channel;
@@ -616,10 +619,14 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
                               text.text.c_str(),
                               (safeLen > shown) ? "..." : "");
 
-    if (!sendDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, text.dest, text.channel, bytes, safeLen)) {
-        Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP send failed, requeue (pb_size=%u)\n",
-                                  static_cast<unsigned>(pb_size));
+    std::uint32_t pktId = 0;
+    if (!sendDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, text.dest, text.channel, bytes, safeLen, &pktId)) {
+        Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP send failed, requeue (pb_size=%u pktId=%u)\n",
+                                  static_cast<unsigned>(pb_size),
+                                  static_cast<unsigned>(pktId));
         Threads::Scope scope(mutex_);
         pendingText_.push_front(std::move(text));
+    } else {
+        Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP queued to radio pktId=%u\n", pktId);
     }
 }
