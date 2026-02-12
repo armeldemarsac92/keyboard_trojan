@@ -143,12 +143,14 @@ DatabaseManager& DatabaseManager::getInstance() {
 std::vector<KeyboardConfig::NodeInfo> DatabaseManager::getRadioNodes() {
     std::vector<KeyboardConfig::NodeInfo> results;
 
+    Logger::instance().println("[DB][Q] SELECT RadioMasters");
     this->getData([&results](sqlite3_stmt* row) {
         const std::uint32_t id = static_cast<std::uint32_t>(sqlite3_column_int(row, 0));
         const std::uint64_t addr = static_cast<std::uint64_t>(sqlite3_column_int64(row, 1));
         results.push_back({id, addr});
     }, KeyboardConfig::Tables::RadioMasters);
 
+    Logger::instance().printf("[DB][Q] SELECT RadioMasters returned=%u\n", static_cast<unsigned>(results.size()));
     return results;
 }
 
@@ -157,6 +159,7 @@ void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback
         return;
     }
 
+    Logger::instance().printf("[DB][Q] SELECT * FROM %s\n", table.tableName.c_str());
     Threads::Scope scope(dbMutex_);
 
     const std::string query = "SELECT * FROM " + table.tableName + ";";
@@ -168,11 +171,14 @@ void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback
         return;
     }
 
+    std::uint32_t rows = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         callback(stmt);
+        ++rows;
     }
 
     sqlite3_finalize(stmt);
+    Logger::instance().printf("[DB][Q] SELECT * FROM %s rows=%u\n", table.tableName.c_str(), static_cast<unsigned>(rows));
 }
 
 void DatabaseManager::saveData(std::vector<std::string> data, const DBTable& table) {

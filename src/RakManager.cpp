@@ -618,11 +618,17 @@ void RakManager::listenerThread(void* arg) {
     std::uint32_t lastActionTime = millis();
     constexpr std::uint32_t kHeartbeatIntervalMs = 120'000U;
     constexpr const char* kHeartbeatText = "Heartbeat";
+    static bool loggedNodeNum = false;
     auto& instance = RakManager::getInstance();
 
     while (true) {
         const std::uint32_t now = millis();
         mt_loop(now);
+
+        if (!loggedNodeNum && my_node_num != 0U) {
+            Logger::instance().printf("[RAK] my_node_num=%u\n", static_cast<unsigned>(my_node_num));
+            loggedNodeNum = true;
+        }
 
         // Handle queued commands outside of mt_loop() callbacks.
         instance.processCommands();
