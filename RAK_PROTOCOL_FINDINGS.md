@@ -118,6 +118,68 @@ Introduce a small module/class (example naming):
     - `onProgress(id, sentChunks, ackedChunks)`
     - `onError(id, reason)`
 
+## Current Implementation (in this branch)
+
+Implemented a first working version in:
+
+- `Keyboard/include/RakTransport.h`
+- `Keyboard/src/RakTransport.cpp`
+
+Integration points:
+
+- `RakManager::portnum_callback(...)` enqueues `PortNum::PRIVATE_APP` payloads into `RakTransport` (no sends in callback).
+- `RakManager::listenerThread(...)` calls `mt_loop(now)` then `transport_.tick(now)` to process RX/TX.
+- `RakManager::handleAiCompletion(...)` and the heartbeat no longer call `mt_send_text()` directly; they enqueue text sends so Meshtastic sends are serialized.
+
+Thread-safety fix:
+
+- `RakManager::mastersAddresses` is now guarded by `mastersMutex_`, and read operations use snapshots to avoid iterator invalidation/data races.
+
+### Reliable Transfer Strategy (v1)
+
+Stop-and-wait per chunk (single active transfer at a time):
+
+- Sender sends chunk `i`, waits for app-level ACK `(msgId, chunkIndex=i)`.
+- If ACK not received within `ackTimeoutMs`, resend chunk `i`.
+- Abort after `maxRetriesPerChunk`.
+- Receiver ACKs each received chunk (idempotent ACK for duplicates).
+- Receiver reassembles chunks and emits `payloadCompleteCb_` when all chunks are present.
+
+### Frame Format (PRIVATE_APP, binary, v1)
+
+All frames are carried in `MeshPacket.decoded.payload` with `decoded.portnum = PRIVATE_APP`.
+
+- Max decoded payload bytes (nanopb): 233 (`PB_BYTES_ARRAY_T(233)` in generated `mesh.pb.h`).
+- Header is 16 bytes, little-endian integers.
+- Therefore max chunk data per packet is `233 - 16 = 217` bytes.
+
+Header layout:
+
+- `magic[2]` = `0x52 0x4B` (ASCII `R K`)
+- `version` = `1`
+- `type` = `1` DATA, `2` ACK
+- `msgId` (u32)
+- `chunkIndex` (u16)
+- `chunkCount` (u16)
+- `totalLen` (u32)
+
+DATA frame:
+
+- Header + `chunkData[...]` (0..217 bytes)
+
+ACK frame:
+
+- Header only (no trailing payload)
+
+### Important Meshtastic-arduino Limitation Mitigation
+
+The client library clears its RX FIFO (`pb_size = 0`) after encoding/sending (`_mt_send_toRadio(...)`). If we send while `pb_size != 0`, we can discard partially-received bytes that were already consumed from the serial stream (leading to a dropped/corrupted incoming protobuf frame).
+
+Mitigation implemented:
+
+- `RakTransport` checks the internal `pb_size` global and only sends when `pb_size == 0`.
+- This is still an internal coupling to Meshtastic-arduino (`pb_size` and `_mt_send_toRadio` are not public API).
+
 ### Fragmentation frame format (binary)
 
 Use `PortNum.PRIVATE_APP` and put a small header in `meshtastic_Data.payload`.
@@ -166,14 +228,24 @@ Option (2) is cleaner but larger change (maintaining a fork/vendored lib).
 - Best practice portnum selection for private protocols (likely `PortNum.PRIVATE_APP = 256`).
 - Max practical payload per packet over common LoRa presets (233 bytes is the protobuf max, but radio MTU might be smaller for certain settings).
 
+  ## Online Docs Cross-Check (notes)
+
+- Meshtastic "Client API (Serial/TCP/BLE)" docs describe a 4-byte framing header for streaming transports:
+  - START1 `0x94`, START2 `0xC3`, then 16-bit payload length
+  - Receiver treats length >512 as corrupted and resynchronizes
+  - Matches this client library implementation (`MT_MAGIC_0/1` and `PB_BUFSIZE=512`)
+- Meshtastic firmware Phone API surfaces:
+  - `FromRadio.queueStatus` (includes `mesh_packet_id`, free/maxlen/res)
+  - `FromRadio.clientNotification` (includes optional `reply_id` and human-readable message)
+  - The Arduino client library currently parses some of these but does not provide callbacks for them.
+
 ## Next Steps
 
-1. Use `web.run` to fetch:
-   - Meshtastic protobuf/PhoneAPI docs (official)
-   - Meshtastic-arduino repo docs/issues about ACK/QueueStatus behavior
-2. Decide send path:
-   - internal `_mt_send_toRadio()` usage vs vendoring Meshtastic lib
-3. Implement:
-   - `mt_send_private_bytes(dest, channel, bytes)` with strict bounds checks
-   - fragmenter + reassembler + ACK/retry logic
-   - integrate into `RakManager::portnum_callback` for `PRIVATE_APP`
+1. Add a small example call site (or CLI command) that uses `RakManager::sendReliable(...)` / `sendReliableToMasters(...)` for an actual payload.
+2. Decide whether to extend beyond stop-and-wait:
+   - small sliding window
+   - selective ACK bitset
+3. Consider integrity:
+   - optional CRC32 for whole payload (in header or final frame)
+4. If upstream Meshtastic-arduino changes break internal symbols:
+   - vendor/fork the library to expose a supported `mt_send_data(...)` and a safe RX/TX buffer model.

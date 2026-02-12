@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -71,24 +72,49 @@ RakManager::RakManager() {
 }
 
 void RakManager::loadSettingsFromDb() {
-    this->mastersAddresses = DatabaseManager::getInstance().getRadioNodes();
+    const auto loaded = DatabaseManager::getInstance().getRadioNodes();
+    {
+        Threads::Scope scope(mastersMutex_);
+        mastersAddresses = loaded;
+    }
 
-    Serial.printf("Loaded %u nodes successfully.\n", static_cast<unsigned>(this->mastersAddresses.size()));
+    Serial.printf("Loaded %u nodes successfully.\n", static_cast<unsigned>(loaded.size()));
+}
+
+void RakManager::sendReliable(uint32_t dest, uint8_t channel, std::vector<std::uint8_t> payload) {
+    transport_.enqueueReliable(dest, channel, std::move(payload));
+}
+
+void RakManager::sendReliableToMasters(uint8_t channel, const std::vector<std::uint8_t>& payload) {
+    std::vector<KeyboardConfig::NodeInfo> mastersSnapshot;
+    {
+        Threads::Scope scope(mastersMutex_);
+        mastersSnapshot = mastersAddresses;
+    }
+
+    for (const auto& node : mastersSnapshot) {
+        transport_.enqueueReliable(static_cast<std::uint32_t>(node.address), channel, payload);
+    }
 }
 
 void RakManager::handleAiCompletion(String topic, float confidence) {
 
     auto& instance = RakManager::getInstance();
 
-    for (const auto& node : instance.mastersAddresses) {
+    std::vector<KeyboardConfig::NodeInfo> mastersSnapshot;
+    {
+        Threads::Scope scope(instance.mastersMutex_);
+        mastersSnapshot = instance.mastersAddresses;
+    }
 
+    for (const auto& node : mastersSnapshot) {
         String message = "Topic: ";
         message += topic;
         message += ", confidence: ";
-        message += String(confidence); // 2 decimal places
+        message += String(confidence, 2);
         message += "%.";
-        mt_send_text(message.c_str(), node.address, 0);
-        threads.yield();
+
+        instance.transport_.enqueueText(static_cast<std::uint32_t>(node.address), 0, message.c_str());
     }
 }
 
@@ -156,13 +182,11 @@ void RakManager::encrypted_callback(uint32_t from, uint32_t to,  uint8_t channel
 }
 
 void RakManager::portnum_callback(uint32_t from, uint32_t to,  uint8_t channel, meshtastic_PortNum portNum, meshtastic_Data_payload_t *payload) {
-  (void)from;
-  (void)to;
-  (void)channel;
-  (void)payload;
+    auto& instance = RakManager::getInstance();
+    instance.transport_.onPortnumPacket(from, to, channel, portNum, payload);
 
-  Serial.print("Received a callback for PortNum ");
-  Serial.println(meshtastic_portnum_to_string(portNum));
+    Serial.print("Received a callback for PortNum ");
+    Serial.println(meshtastic_portnum_to_string(portNum));
 }
 
 void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, const char* text) {
@@ -196,17 +220,26 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             }
 
             const std::uint64_t fromAddress = static_cast<std::uint64_t>(from);
-            const bool alreadyEnrolled = std::any_of(
-                instance.mastersAddresses.cbegin(),
-                instance.mastersAddresses.cend(),
-                [fromAddress](const KeyboardConfig::NodeInfo& node) {
-                    return node.address == fromAddress;
-                });
+            bool alreadyEnrolled = false;
+            bool added = false;
+            {
+                Threads::Scope scope(instance.mastersMutex_);
+                alreadyEnrolled = std::any_of(
+                    instance.mastersAddresses.cbegin(),
+                    instance.mastersAddresses.cend(),
+                    [fromAddress](const KeyboardConfig::NodeInfo& node) {
+                        return node.address == fromAddress;
+                    });
+
+                if (!alreadyEnrolled) {
+                    instance.mastersAddresses.push_back({0U, fromAddress});
+                    added = true;
+                }
+            }
 
             if (alreadyEnrolled) {
                 Serial.printf("[RAK] Node %u is already enrolled as master.\n", from);
-            } else {
-                instance.mastersAddresses.push_back({0U, fromAddress});
+            } else if (added) {
                 DatabaseManager::getInstance().saveData({std::to_string(from)}, KeyboardConfig::Tables::RadioMasters);
                 Serial.printf("[RAK] Added new master node: %u\n", from);
             }
@@ -237,9 +270,16 @@ void RakManager::begin() {
     set_text_message_callback(onTextMessage);
 
     NlpManager::getInstance().setCallback(RakManager::handleAiCompletion);
+    transport_.setPayloadCompleteCallback(onPrivatePayloadComplete);
 
     Serial.println("[RAK] Manager Init with Callback System...");
     threads.addThread(listenerThread, nullptr, 4096);
+}
+
+void RakManager::onPrivatePayloadComplete(uint32_t from, uint8_t channel, const std::uint8_t* bytes, std::size_t len) {
+    Serial.printf("[RAK] PRIVATE_APP payload complete: from=%u channel=%u len=%u\n", from, channel,
+                  static_cast<unsigned>(len));
+    (void)bytes;
 }
 
 void RakManager::listenerThread(void* arg) {
@@ -251,18 +291,27 @@ void RakManager::listenerThread(void* arg) {
     auto& instance = RakManager::getInstance();
 
     while (true) {
-        mt_loop(millis());
+        const std::uint32_t now = millis();
+        mt_loop(now);
 
-        if (millis() - lastActionTime >= kHeartbeatIntervalMs) {
-            lastActionTime = millis();
+        if (now - lastActionTime >= kHeartbeatIntervalMs) {
+            lastActionTime = now;
 
             Serial.println("Sending rak heartbeat to known masters");
 
-            for (const auto& node : instance.mastersAddresses) {
+            std::vector<KeyboardConfig::NodeInfo> mastersSnapshot;
+            {
+                Threads::Scope scope(instance.mastersMutex_);
+                mastersSnapshot = instance.mastersAddresses;
+            }
+
+            for (const auto& node : mastersSnapshot) {
                 Serial.println(node.address);
-                mt_send_text(kHeartbeatText, node.address, 0);
+                instance.transport_.enqueueText(static_cast<std::uint32_t>(node.address), 0, kHeartbeatText);
             }
         }
+
+        instance.transport_.tick(now);
         threads.yield();
     }
 }
