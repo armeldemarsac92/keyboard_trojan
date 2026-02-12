@@ -27,11 +27,15 @@ Reduce the VFS journal buffer size at compile time:
 
 Also reduced log spam on failure:
 
-- `executeInsertTransaction(...)` now checks `sqlite3_get_autocommit(db)` before issuing `ROLLBACK;` to avoid
+- The DB transaction helper checks `sqlite3_get_autocommit(db)` before issuing `ROLLBACK;` to avoid
   `cannot rollback - no transaction is active` errors when the transaction never fully started.
+
+Implementation note:
+
+- The project currently uses `sqlite3_exec()` with SQL strings (built via `buildSQLInsertStatement(...)`) to match the
+  original/simple approach while still escaping apostrophes in TEXT fields.
 
 ## Notes / Follow-ups
 
 If you still hit `SQLITE_NOMEM` with `2048`, lower further (e.g. `1024` or `512`) at the cost of more journal writes
 and potentially slower commits.
-

@@ -12,12 +12,7 @@ namespace KeyboardConfig {
 
 class DatabaseManager {
 private:
-    struct PendingInsert {
-        const DBTable* table = nullptr;
-        std::vector<std::string> values;
-    };
-
-    std::vector<PendingInsert> pendingInserts_;
+    std::vector<std::string> pendingStatements_;
     sqlite3* dbConnection = nullptr;
     Threads::Mutex queueMutex;
     Threads::Mutex dbMutex_;

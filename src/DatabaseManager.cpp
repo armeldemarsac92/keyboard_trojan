@@ -2,10 +2,8 @@
 
 #include <Arduino.h>
 #include <algorithm>
-#include <cerrno>
+#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -14,140 +12,36 @@
 
 #include "ArduinoSQLiteHandler.h"
 #include "Logger.h"
-#include "usb_serial.h"
 #include "../config/KeyboardConfig.h"
 
 namespace {
-bool isColumnType(const std::string& type, const std::string_view needle) {
-    return type.find(needle) != std::string::npos;
-}
-
 bool isTextColumnType(const std::string& columnType) {
-    return isColumnType(columnType, "TEXT");
+    return columnType.find("TEXT") != std::string::npos;
 }
 
-bool isIntegerColumnType(const std::string& columnType) {
-    return isColumnType(columnType, "INTEGER");
-}
+// Escape for SQL string literals: ' => ''.
+// This is the minimal fix to avoid malformed INSERT statements when user input contains apostrophes.
+std::string escapeSqlStringLiteral(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size());
 
-bool isRealColumnType(const std::string& columnType) {
-    return isColumnType(columnType, "REAL");
-}
-
-std::string buildInsertSql(const DBTable& table) {
-    std::string sql = "INSERT INTO " + table.tableName + " (";
-    std::string values = "VALUES (";
-
-    bool first = true;
-    std::size_t insertableCols = 0;
-    for (const auto& col : table.columns) {
-        if (col.isPrimaryKey) {
+    for (const char c : value) {
+        if (c == '\'') {
+            escaped.push_back('\'');
+            escaped.push_back('\'');
+        } else if (c == '\0') {
+            // sqlite3_exec() uses C-strings and would truncate at NUL anyway.
+            // Drop it to avoid embedding invisible truncation points.
             continue;
+        } else {
+            escaped.push_back(c);
         }
-
-        if (!first) {
-            sql += ", ";
-            values += ", ";
-        }
-        first = false;
-
-        sql += col.name;
-        values += "?";
-        ++insertableCols;
     }
 
-    if (insertableCols == 0) {
-        return {};
-    }
-
-    sql += ") ";
-    values += ");";
-    sql += values;
-    return sql;
+    return escaped;
 }
 
-bool tryParseInt64(const std::string& s, std::int64_t& out) {
-    if (s.empty()) {
-        return false;
-    }
-
-    char* end = nullptr;
-    errno = 0;
-    const long long v = std::strtoll(s.c_str(), &end, 10);
-    if (errno != 0) {
-        return false;
-    }
-
-    if (end == nullptr || end == s.c_str() || *end != '\0') {
-        return false;
-    }
-
-    out = static_cast<std::int64_t>(v);
-    return true;
-}
-
-bool tryParseDouble(const std::string& s, double& out) {
-    if (s.empty()) {
-        return false;
-    }
-
-    char* end = nullptr;
-    errno = 0;
-    const double v = std::strtod(s.c_str(), &end);
-    if (errno != 0) {
-        return false;
-    }
-
-    if (end == nullptr || end == s.c_str() || *end != '\0') {
-        return false;
-    }
-
-    out = v;
-    return true;
-}
-
-int bindColumnValue(sqlite3_stmt* stmt, int paramIndex, const DBColumn& col, const std::string& value) {
-    if (stmt == nullptr) {
-        return SQLITE_MISUSE;
-    }
-
-    if (isTextColumnType(col.type)) {
-        return sqlite3_bind_text(stmt, paramIndex, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
-    }
-
-    if (isIntegerColumnType(col.type)) {
-        std::int64_t v = 0;
-        if (tryParseInt64(value, v)) {
-            return sqlite3_bind_int64(stmt, paramIndex, v);
-        }
-        if (value.empty()) {
-            return sqlite3_bind_null(stmt, paramIndex);
-        }
-        // Fallback: keep the row, but log invalid numeric input.
-        Logger::instance().printf("[DB] Warning: invalid INTEGER value for column '%s': '%s'\n", col.name.c_str(),
-                                  value.c_str());
-        return sqlite3_bind_text(stmt, paramIndex, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
-    }
-
-    if (isRealColumnType(col.type)) {
-        double v = 0.0;
-        if (tryParseDouble(value, v)) {
-            return sqlite3_bind_double(stmt, paramIndex, v);
-        }
-        if (value.empty()) {
-            return sqlite3_bind_null(stmt, paramIndex);
-        }
-        Logger::instance().printf("[DB] Warning: invalid REAL value for column '%s': '%s'\n", col.name.c_str(),
-                                  value.c_str());
-        return sqlite3_bind_text(stmt, paramIndex, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
-    }
-
-    // Unknown column type: bind as text.
-    return sqlite3_bind_text(stmt, paramIndex, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
-}
-
-int bindInsertValues(sqlite3_stmt* stmt, const DBTable& table, const std::vector<std::string>& values) {
-    int paramIndex = 1;
+void escapeInsertDataInPlace(const DBTable& table, std::vector<std::string>& data) {
     std::size_t dataIndex = 0;
 
     for (const auto& col : table.columns) {
@@ -155,49 +49,29 @@ int bindInsertValues(sqlite3_stmt* stmt, const DBTable& table, const std::vector
             continue;
         }
 
-        if (dataIndex >= values.size()) {
-            return SQLITE_MISMATCH;
+        if (dataIndex >= data.size()) {
+            return;
         }
 
-        const int rc = bindColumnValue(stmt, paramIndex, col, values[dataIndex]);
-        if (rc != SQLITE_OK) {
-            return rc;
+        if (isTextColumnType(col.type)) {
+            data[dataIndex] = escapeSqlStringLiteral(data[dataIndex]);
+        } else {
+            // Avoid invalid SQL like: VALUES (, ...)
+            if (data[dataIndex].empty()) {
+                data[dataIndex] = "NULL";
+            }
         }
 
-        ++paramIndex;
         ++dataIndex;
     }
-
-    // Extra provided values are considered a mismatch (programmer error).
-    if (dataIndex != values.size()) {
-        return SQLITE_MISMATCH;
-    }
-
-    return SQLITE_OK;
 }
 
-struct PreparedInsertStmt {
-    const DBTable* table = nullptr;
-    std::string sql;
-    sqlite3_stmt* stmt = nullptr;
-};
-
-void finalizePrepared(std::vector<PreparedInsertStmt>& prepared) {
-    for (auto& p : prepared) {
-        if (p.stmt) {
-            sqlite3_finalize(p.stmt);
-            p.stmt = nullptr;
-        }
-    }
-}
-
-template <typename Inserts>
-bool executeInsertTransaction(sqlite3* db, const Inserts& inserts) {
+bool executeSqlTransaction(sqlite3* db, const std::vector<std::string>& statements) {
     if (db == nullptr) {
         return false;
     }
 
-    if (inserts.empty()) {
+    if (statements.empty()) {
         return true;
     }
 
@@ -209,104 +83,42 @@ bool executeInsertTransaction(sqlite3* db, const Inserts& inserts) {
         return false;
     }
 
-	    std::vector<PreparedInsertStmt> prepared;
-	    prepared.reserve(2);  // common case: Inputs + RadioMasters
-
-	    auto rollback = [&]() {
-	        // Some failures (e.g. OOM opening the journal) may leave us in autocommit mode, making ROLLBACK noisy.
-	        if (sqlite3_get_autocommit(db) == 0) {
-	            (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-	        }
-	    };
-
-    for (const auto& ins : inserts) {
-        if (ins.table == nullptr) {
-            rollback();
-            finalizePrepared(prepared);
-            return false;
+    auto rollback = [&]() {
+        // Some failures (e.g. OOM opening the journal) may leave us in autocommit mode, making ROLLBACK noisy.
+        if (sqlite3_get_autocommit(db) == 0) {
+            (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
         }
+    };
 
-        const DBTable& table = *ins.table;
-
-        PreparedInsertStmt* cached = nullptr;
-        for (auto& p : prepared) {
-            if (p.table == ins.table) {
-                cached = &p;
-                break;
-            }
-        }
-
-        if (cached == nullptr) {
-            PreparedInsertStmt p;
-            p.table = ins.table;
-            p.sql = buildInsertSql(table);
-            if (p.sql.empty()) {
-                Logger::instance().printf("[DB] Failed to build INSERT SQL for table '%s'\n", table.tableName.c_str());
-                rollback();
-                finalizePrepared(prepared);
-                return false;
-            }
-
-            rc = sqlite3_prepare_v2(db, p.sql.c_str(), -1, &p.stmt, nullptr);
-            if (rc != SQLITE_OK) {
-                Logger::instance().printf("[DB] Prepare failed (%s): %s\n", table.tableName.c_str(), sqlite3_errmsg(db));
-                rollback();
-                finalizePrepared(prepared);
-                return false;
-            }
-
-            prepared.push_back(std::move(p));
-            cached = &prepared.back();
-        }
-
-        rc = sqlite3_reset(cached->stmt);
+    for (const auto& stmt : statements) {
+        errMsg = nullptr;
+        rc = sqlite3_exec(db, stmt.c_str(), nullptr, nullptr, &errMsg);
         if (rc != SQLITE_OK) {
-            Logger::instance().printf("[DB] Reset failed (%s): %s\n", table.tableName.c_str(), sqlite3_errmsg(db));
+            constexpr std::size_t kMaxLoggedSqlChars = 120;
+            const std::size_t shown = std::min(stmt.size(), kMaxLoggedSqlChars);
+            Logger::instance().printf("[DB] SQL exec failed: rc=%d err=%s sql=\"%.*s%s\"\n",
+                                      rc,
+                                      errMsg ? errMsg : "<null>",
+                                      static_cast<int>(shown),
+                                      stmt.c_str(),
+                                      (stmt.size() > shown) ? "..." : "");
+            sqlite3_free(errMsg);
             rollback();
-            finalizePrepared(prepared);
-            return false;
-        }
-
-        rc = sqlite3_clear_bindings(cached->stmt);
-        if (rc != SQLITE_OK) {
-            Logger::instance().printf("[DB] Clear bindings failed (%s): %s\n", table.tableName.c_str(),
-                                      sqlite3_errmsg(db));
-            rollback();
-            finalizePrepared(prepared);
-            return false;
-        }
-
-        rc = bindInsertValues(cached->stmt, table, ins.values);
-        if (rc != SQLITE_OK) {
-            Logger::instance().printf("[DB] Bind failed (%s): rc=%d\n", table.tableName.c_str(), rc);
-            rollback();
-            finalizePrepared(prepared);
-            return false;
-        }
-
-        rc = sqlite3_step(cached->stmt);
-        if (rc != SQLITE_DONE) {
-            Logger::instance().printf("[DB] Step failed (%s): rc=%d err=%s\n", table.tableName.c_str(), rc,
-                                      sqlite3_errmsg(db));
-            rollback();
-            finalizePrepared(prepared);
             return false;
         }
     }
 
+    errMsg = nullptr;
     rc = sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &errMsg);
     if (rc != SQLITE_OK) {
         Logger::instance().printf("[DB] COMMIT failed: %s\n", errMsg ? errMsg : "<null>");
         sqlite3_free(errMsg);
         rollback();
-        finalizePrepared(prepared);
         return false;
     }
 
-    finalizePrepared(prepared);
     return true;
 }
-
 }  // namespace
 
 DatabaseManager::DatabaseManager() {
@@ -350,7 +162,7 @@ void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback
 
     const int rc = sqlite3_prepare_v2(dbConnection, query.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        Logger::instance().printf("Database Read Error: %s\n", sqlite3_errmsg(dbConnection));
+        Logger::instance().printf("[DB] Read error: %s\n", sqlite3_errmsg(dbConnection));
         return;
     }
 
@@ -376,13 +188,15 @@ void DatabaseManager::saveData(std::vector<std::string> data, const DBTable& tab
         return;
     }
 
-    PendingInsert pending;
-    pending.table = &table;
-    pending.values = std::move(data);
+    escapeInsertDataInPlace(table, data);
+    std::string sqlStatement = buildSQLInsertStatement(table, data);
+    if (sqlStatement.empty()) {
+        return;
+    }
 
     Threads::Scope scope(queueMutex);
-    constexpr std::size_t kMaxPendingInserts = 500;
-    if (pendingInserts_.size() >= kMaxPendingInserts) {
+    constexpr std::size_t kMaxPendingStatements = 500;
+    if (pendingStatements_.size() >= kMaxPendingStatements) {
         static bool warnedQueueFull = false;
         if (!warnedQueueFull) {
             Logger::instance().println("[DB] Insert queue full. Dropping rows.");
@@ -390,7 +204,8 @@ void DatabaseManager::saveData(std::vector<std::string> data, const DBTable& tab
         }
         return;
     }
-    pendingInserts_.push_back(std::move(pending));
+
+    pendingStatements_.push_back(std::move(sqlStatement));
 }
 
 void DatabaseManager::processQueue() {
@@ -406,73 +221,55 @@ void DatabaseManager::processQueue() {
     constexpr std::uint32_t kMaxFlushDelayMs = 60'000;
     constexpr std::uint32_t kFailureBackoffMs = 5'000;
 
-    std::vector<PendingInsert> batchToSave;
+    std::vector<std::string> batchToSave;
     const std::uint32_t now = millis();
 
     {
         Threads::Scope scope(queueMutex);
 
         const bool backoffActive = (lastFailureTime != 0U) && (now - lastFailureTime < kFailureBackoffMs);
-        const bool shouldWrite = (pendingInserts_.size() >= kBatchSize) ||
-                                 (!pendingInserts_.empty() && (now - lastWriteTime > kMaxFlushDelayMs));
+        const bool shouldWrite = (pendingStatements_.size() >= kBatchSize) ||
+                                 (!pendingStatements_.empty() && (now - lastWriteTime > kMaxFlushDelayMs));
 
-        if (shouldWrite && !backoffActive) {
-            const std::size_t toFlush = std::min<std::size_t>(pendingInserts_.size(), kMaxBatchPerFlush);
-            batchToSave.reserve(toFlush);
-
-            const std::size_t startIndex = pendingInserts_.size() - toFlush;
-            for (std::size_t i = startIndex; i < pendingInserts_.size(); ++i) {
-                batchToSave.push_back(std::move(pendingInserts_[i]));
-            }
-            pendingInserts_.resize(startIndex);
+        if (backoffActive || !shouldWrite) {
+            return;
         }
-    }
 
-    if (batchToSave.empty()) {
-        return;
+        const std::size_t toFlush = std::min<std::size_t>(pendingStatements_.size(), kMaxBatchPerFlush);
+        batchToSave.reserve(toFlush);
+
+        // Flush oldest first to preserve chronological ordering.
+        for (std::size_t i = 0; i < toFlush; ++i) {
+            batchToSave.push_back(std::move(pendingStatements_[i]));
+        }
+        using Diff = std::vector<std::string>::difference_type;
+        pendingStatements_.erase(pendingStatements_.begin(), pendingStatements_.begin() + static_cast<Diff>(toFlush));
     }
 
     const bool ok = [&]() {
         Threads::Scope dbLock(dbMutex_);
-        return executeInsertTransaction(dbConnection, batchToSave);
+        return executeSqlTransaction(dbConnection, batchToSave);
     }();
 
     if (!ok) {
         Logger::instance().println("[DB] Transaction failed, re-queueing rows.");
         Threads::Scope scope(queueMutex);
-        pendingInserts_.insert(pendingInserts_.end(),
-                               std::make_move_iterator(batchToSave.begin()),
-                               std::make_move_iterator(batchToSave.end()));
+        pendingStatements_.insert(pendingStatements_.begin(),
+                                  std::make_move_iterator(batchToSave.begin()),
+                                  std::make_move_iterator(batchToSave.end()));
         lastFailureTime = now;
     } else {
         lastFailureTime = 0;
 
-        std::size_t inputsCount = 0;
-        std::size_t mastersCount = 0;
-        std::size_t otherCount = 0;
-        for (const auto& ins : batchToSave) {
-            if (ins.table == &KeyboardConfig::Tables::Inputs) {
-                ++inputsCount;
-            } else if (ins.table == &KeyboardConfig::Tables::RadioMasters) {
-                ++mastersCount;
-            } else {
-                ++otherCount;
-            }
-        }
-
         std::size_t pending = 0;
         {
             Threads::Scope scope(queueMutex);
-            pending = pendingInserts_.size();
+            pending = pendingStatements_.size();
         }
 
-        Logger::instance().printf(
-            "[DB] Committed %u insert(s) (Inputs=%u Masters=%u Other=%u). Pending=%u\n",
-            static_cast<unsigned>(batchToSave.size()),
-            static_cast<unsigned>(inputsCount),
-            static_cast<unsigned>(mastersCount),
-            static_cast<unsigned>(otherCount),
-            static_cast<unsigned>(pending));
+        Logger::instance().printf("[DB] Committed %u insert(s). Pending=%u\n",
+                                  static_cast<unsigned>(batchToSave.size()),
+                                  static_cast<unsigned>(pending));
     }
 
     lastWriteTime = now;
