@@ -1,6 +1,7 @@
 #include "DatabaseManager.h"
 
 #include <Arduino.h>
+#include <array>
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
@@ -304,33 +305,186 @@ bool executeInsertTransaction(sqlite3* db, const Inserts& inserts) {
     return true;
 }
 
-int migrateInputTimestampsToSecondsStep(sqlite3* db, std::size_t maxRows) {
-    if (db == nullptr || maxRows == 0) {
-        return 0;
-    }
+	int migrateInputTimestampsToSecondsStep(sqlite3* db, std::size_t maxRows) {
+	    if (db == nullptr || maxRows == 0) {
+	        return 0;
+	    }
 
-    // Historical rows used to store `micros()` directly (microseconds). We now store seconds.
-    // `micros()` is a 32-bit counter (wraps at ~4294 seconds), therefore any timestamp >10k cannot be valid
-    // seconds-based data and is safe to convert from microseconds.
-    const std::string sql =
-        "UPDATE " + KeyboardConfig::Tables::Inputs.tableName +
-        " SET Timestamp = CAST(Timestamp AS REAL) / 1000000.0"
-        " WHERE rowid IN ("
-        "   SELECT rowid FROM " + KeyboardConfig::Tables::Inputs.tableName +
-        "   WHERE CAST(Timestamp AS REAL) > 10000.0"
-        "   LIMIT " + std::to_string(maxRows) +
-        " );";
+	    // Historical rows used to store `micros()` directly (microseconds). We now store seconds.
+	    // `micros()` is a 32-bit counter (wraps at ~4294 seconds), therefore any timestamp >10k cannot be valid
+	    // seconds-based data and is safe to convert from microseconds.
+	    constexpr double kLegacyThresholdSeconds = 10000.0;
+	    constexpr double kMicrosToSeconds = 1000000.0;
+	    constexpr std::size_t kMaxRowsPerStep = 32;
 
-    char* errMsg = nullptr;
-    const int rc = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &errMsg);
-    if (rc != SQLITE_OK) {
-        Logger::instance().printf("[DB] Timestamp migration failed: %s\n", errMsg ? errMsg : "<null>");
-        sqlite3_free(errMsg);
-        return -1;
-    }
+	    const std::size_t cappedRows = std::min(maxRows, kMaxRowsPerStep);
+	    if (cappedRows == 0) {
+	        return 0;
+	    }
 
-    return sqlite3_changes(db);
-}
+	    struct ScopedStmt {
+	        sqlite3_stmt* stmt = nullptr;
+	        ScopedStmt() = default;
+	        ~ScopedStmt() {
+	            if (stmt) {
+	                sqlite3_finalize(stmt);
+	                stmt = nullptr;
+	            }
+	        }
+	        ScopedStmt(const ScopedStmt&) = delete;
+	        ScopedStmt& operator=(const ScopedStmt&) = delete;
+	        ScopedStmt(ScopedStmt&&) = delete;
+	        ScopedStmt& operator=(ScopedStmt&&) = delete;
+	    };
+
+	    std::array<sqlite3_int64, kMaxRowsPerStep> rowids{};
+	    std::size_t rowCount = 0;
+
+	    // Avoid a single complex UPDATE-with-subquery which can OOM on-device. Instead:
+	    // 1) Select a small batch of rowids that look like legacy microseconds timestamps
+	    // 2) Update each row individually inside a short transaction
+	    {
+	        ScopedStmt selectStmt;
+	        int rc = sqlite3_prepare_v2(db,
+	                                   "SELECT rowid FROM Inputs WHERE Timestamp > ?1 LIMIT ?2;",
+	                                   -1,
+	                                   &selectStmt.stmt,
+	                                   nullptr);
+	        if (rc == SQLITE_NOMEM) {
+	            Logger::instance().println("[DB] Timestamp migration failed: out of memory (prepare SELECT)");
+	            return -2;
+	        }
+	        if (rc != SQLITE_OK) {
+	            Logger::instance().printf("[DB] Timestamp migration failed (prepare SELECT): %s\n", sqlite3_errmsg(db));
+	            return -1;
+	        }
+
+	        rc = sqlite3_bind_double(selectStmt.stmt, 1, kLegacyThresholdSeconds);
+	        if (rc == SQLITE_NOMEM) {
+	            Logger::instance().println("[DB] Timestamp migration failed: out of memory (bind threshold)");
+	            return -2;
+	        }
+	        if (rc != SQLITE_OK) {
+	            Logger::instance().printf("[DB] Timestamp migration failed (bind threshold): rc=%d\n", rc);
+	            return -1;
+	        }
+
+	        rc = sqlite3_bind_int(selectStmt.stmt, 2, static_cast<int>(cappedRows));
+	        if (rc == SQLITE_NOMEM) {
+	            Logger::instance().println("[DB] Timestamp migration failed: out of memory (bind limit)");
+	            return -2;
+	        }
+	        if (rc != SQLITE_OK) {
+	            Logger::instance().printf("[DB] Timestamp migration failed (bind limit): rc=%d\n", rc);
+	            return -1;
+	        }
+
+	        int stepRc = SQLITE_OK;
+	        while (rowCount < cappedRows) {
+	            stepRc = sqlite3_step(selectStmt.stmt);
+	            if (stepRc == SQLITE_ROW) {
+	                rowids[rowCount] = sqlite3_column_int64(selectStmt.stmt, 0);
+	                ++rowCount;
+	                continue;
+	            }
+	            break;
+	        }
+
+	        if (stepRc != SQLITE_DONE && stepRc != SQLITE_ROW) {
+	            if (stepRc == SQLITE_NOMEM) {
+	                Logger::instance().println("[DB] Timestamp migration failed: out of memory (step SELECT)");
+	                return -2;
+	            }
+	            Logger::instance().printf("[DB] Timestamp migration failed (step SELECT): rc=%d err=%s\n",
+	                                      stepRc,
+	                                      sqlite3_errmsg(db));
+	            return -1;
+	        }
+	    }
+
+	    if (rowCount == 0) {
+	        return 0;
+	    }
+
+	    ScopedStmt updateStmt;
+	    {
+	        const int rc = sqlite3_prepare_v2(db,
+	                                          "UPDATE Inputs SET Timestamp = Timestamp / ?1 WHERE rowid = ?2;",
+	                                          -1,
+	                                          &updateStmt.stmt,
+	                                          nullptr);
+	        if (rc == SQLITE_NOMEM) {
+	            Logger::instance().println("[DB] Timestamp migration failed: out of memory (prepare UPDATE)");
+	            return -2;
+	        }
+	        if (rc != SQLITE_OK) {
+	            Logger::instance().printf("[DB] Timestamp migration failed (prepare UPDATE): %s\n", sqlite3_errmsg(db));
+	            return -1;
+	        }
+	    }
+
+	    char* errMsg = nullptr;
+	    int rc = sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, &errMsg);
+	    if (rc != SQLITE_OK) {
+	        Logger::instance().printf("[DB] Timestamp migration failed (BEGIN): %s\n", errMsg ? errMsg : "<null>");
+	        sqlite3_free(errMsg);
+	        return (rc == SQLITE_NOMEM) ? -2 : -1;
+	    }
+
+	    auto rollback = [&]() {
+	        (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+	    };
+
+	    for (std::size_t i = 0; i < rowCount; ++i) {
+	        rc = sqlite3_reset(updateStmt.stmt);
+	        if (rc != SQLITE_OK) {
+	            Logger::instance().printf("[DB] Timestamp migration failed (reset UPDATE): %s\n", sqlite3_errmsg(db));
+	            rollback();
+	            return (rc == SQLITE_NOMEM) ? -2 : -1;
+	        }
+
+	        rc = sqlite3_clear_bindings(updateStmt.stmt);
+	        if (rc != SQLITE_OK) {
+	            Logger::instance().printf("[DB] Timestamp migration failed (clear bindings UPDATE): %s\n",
+	                                      sqlite3_errmsg(db));
+	            rollback();
+	            return (rc == SQLITE_NOMEM) ? -2 : -1;
+	        }
+
+	        rc = sqlite3_bind_double(updateStmt.stmt, 1, kMicrosToSeconds);
+	        if (rc != SQLITE_OK) {
+	            Logger::instance().printf("[DB] Timestamp migration failed (bind divisor UPDATE): rc=%d\n", rc);
+	            rollback();
+	            return (rc == SQLITE_NOMEM) ? -2 : -1;
+	        }
+
+	        rc = sqlite3_bind_int64(updateStmt.stmt, 2, rowids[i]);
+	        if (rc != SQLITE_OK) {
+	            Logger::instance().printf("[DB] Timestamp migration failed (bind rowid UPDATE): rc=%d\n", rc);
+	            rollback();
+	            return (rc == SQLITE_NOMEM) ? -2 : -1;
+	        }
+
+	        rc = sqlite3_step(updateStmt.stmt);
+	        if (rc != SQLITE_DONE) {
+	            Logger::instance().printf("[DB] Timestamp migration failed (step UPDATE): rc=%d err=%s\n",
+	                                      rc,
+	                                      sqlite3_errmsg(db));
+	            rollback();
+	            return (rc == SQLITE_NOMEM) ? -2 : -1;
+	        }
+	    }
+
+	    rc = sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &errMsg);
+	    if (rc != SQLITE_OK) {
+	        Logger::instance().printf("[DB] Timestamp migration failed (COMMIT): %s\n", errMsg ? errMsg : "<null>");
+	        sqlite3_free(errMsg);
+	        rollback();
+	        return (rc == SQLITE_NOMEM) ? -2 : -1;
+	    }
+
+	    return static_cast<int>(rowCount);
+	}
 }  // namespace
 
 DatabaseManager::DatabaseManager() {
@@ -430,9 +584,9 @@ void DatabaseManager::processQueue() {
     constexpr std::size_t kBatchSize = 20;
     constexpr std::size_t kMaxBatchPerFlush = 50;
     constexpr std::uint32_t kMaxFlushDelayMs = 60'000;
-    constexpr std::uint32_t kFailureBackoffMs = 5'000;
-    constexpr std::uint32_t kMigrationIntervalMs = 250;
-    constexpr std::size_t kMigrationChunkRows = 200;
+	    constexpr std::uint32_t kFailureBackoffMs = 5'000;
+	    constexpr std::uint32_t kMigrationIntervalMs = 250;
+	    constexpr std::size_t kMigrationChunkRows = 32;
 
     std::vector<PendingInsert> batchToSave;
     bool queueEmpty = false;
@@ -493,12 +647,17 @@ void DatabaseManager::processQueue() {
             return migrateInputTimestampsToSecondsStep(dbConnection, kMigrationChunkRows);
         }();
 
-        if (changed == 0) {
-            migrationDone = true;
-            Logger::instance().println("[DB] Timestamp migration complete.");
-        } else if (changed < 0) {
-            // Avoid hammering the SD card on repeated failures.
-            lastFailureTime = now;
-        }
-    }
-}
+	        if (changed == 0) {
+	            migrationDone = true;
+	            Logger::instance().println("[DB] Timestamp migration complete.");
+	        } else if (changed == -2) {
+	            // If we hit SQLITE_NOMEM during migration, stop trying: repeated attempts can further fragment heap
+	            // and will spam logs. If legacy data matters, migrate off-device or delete/recreate the DB.
+	            migrationDone = true;
+	            Logger::instance().println("[DB] Timestamp migration disabled (out of memory).");
+	        } else if (changed < 0) {
+	            // Avoid hammering the SD card on repeated failures.
+	            lastFailureTime = now;
+	        }
+	    }
+	}
