@@ -213,6 +213,35 @@ void RakTransport::setPayloadCompleteCallback(PayloadCompleteCallback cb) {
 }
 
 void RakTransport::enqueueText(uint32_t dest, uint8_t channel, std::string text) {
+    if constexpr (Logger::enabled()) {
+        constexpr std::size_t kPreviewChars = 60;
+        const std::size_t len = text.size();
+        const std::size_t shown = std::min<std::size_t>(len, kPreviewChars);
+
+        char preview[kPreviewChars + 1]{};
+        if (shown > 0) {
+            std::memcpy(preview, text.data(), shown);
+            preview[shown] = '\0';
+        }
+
+        std::size_t pending = 0;
+        {
+            Threads::Scope scope(mutex_);
+            pendingText_.push_back(OutboundText{dest, channel, std::move(text)});
+            pending = pendingText_.size();
+        }
+
+        Logger::instance().printf("[RAK][TXQ] text enqueued dest=%u ch=%u len=%u pending=%u preview=\"%.*s%s\"\n",
+                                  dest,
+                                  channel,
+                                  static_cast<unsigned>(len),
+                                  static_cast<unsigned>(pending),
+                                  static_cast<int>(shown),
+                                  preview,
+                                  (len > shown) ? "..." : "");
+        return;
+    }
+
     Threads::Scope scope(mutex_);
     pendingText_.push_back(OutboundText{dest, channel, std::move(text)});
 }
@@ -227,7 +256,6 @@ void RakTransport::enqueueReliable(uint32_t dest, uint8_t channel, std::vector<s
         return;
     }
 
-    Threads::Scope scope(mutex_);
     OutboundTransfer t;
     t.dest = dest;
     t.channel = channel;
@@ -235,6 +263,29 @@ void RakTransport::enqueueReliable(uint32_t dest, uint8_t channel, std::vector<s
     t.payload = std::move(payload);
     t.chunkCount = computeChunkCount(t.payload.size());
     t.options = options;
+
+    if constexpr (Logger::enabled()) {
+        const std::size_t bytes = t.payload.size();
+        const auto chunks = t.chunkCount;
+        const auto msgId = t.msgId;
+        std::size_t pending = 0;
+        {
+            Threads::Scope scope(mutex_);
+            pendingTransfers_.push_back(std::move(t));
+            pending = pendingTransfers_.size();
+        }
+
+        Logger::instance().printf("[RAK][TXQ] reliable enqueued dest=%u ch=%u msgId=%u bytes=%u chunks=%u pending=%u\n",
+                                  dest,
+                                  channel,
+                                  msgId,
+                                  static_cast<unsigned>(bytes),
+                                  static_cast<unsigned>(chunks),
+                                  static_cast<unsigned>(pending));
+        return;
+    }
+
+    Threads::Scope scope(mutex_);
     pendingTransfers_.push_back(std::move(t));
 }
 
@@ -305,6 +356,12 @@ void RakTransport::drainInboundFrames(std::uint32_t nowMs) {
             activeTransfer_.nextChunkIndex = static_cast<std::uint16_t>(activeTransfer_.nextChunkIndex + 1);
 
             if (activeTransfer_.nextChunkIndex >= activeTransfer_.chunkCount) {
+                Logger::instance().printf("[RAK][TX] reliable complete dest=%u ch=%u msgId=%u bytes=%u chunks=%u\n",
+                                          activeTransfer_.dest,
+                                          activeTransfer_.channel,
+                                          activeTransfer_.msgId,
+                                          static_cast<unsigned>(activeTransfer_.payload.size()),
+                                          static_cast<unsigned>(activeTransfer_.chunkCount));
                 hasActiveTransfer_ = false;
             }
 
@@ -424,6 +481,8 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
             if (!sendDecodedPacket(immediate.port, immediate.dest, immediate.channel, immediate.bytes.data(),
                                    immediate.bytes.size())) {
                 // Best-effort: if the send fails, requeue. The sender will retry after timeout anyway.
+                Logger::instance().printf("[RAK][TX] immediate send failed, requeue (pb_size=%u)\n",
+                                          static_cast<unsigned>(pb_size));
                 Threads::Scope scope(mutex_);
                 immediateFrames_.push_front(std::move(immediate));
             }
@@ -448,6 +507,13 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
             }
 
             // Timeout: resend current chunk.
+            Logger::instance().printf("[RAK][TX] reliable retry dest=%u ch=%u msgId=%u chunk=%u/%u attempt=%u\n",
+                                      activeTransfer_.dest,
+                                      activeTransfer_.channel,
+                                      activeTransfer_.msgId,
+                                      activeTransfer_.nextChunkIndex,
+                                      static_cast<unsigned>(activeTransfer_.chunkCount),
+                                      static_cast<unsigned>(activeTransfer_.retriesForCurrentChunk + 1));
             const std::size_t offset = static_cast<std::size_t>(activeTransfer_.nextChunkIndex) * kMaxChunkDataBytes;
             const std::size_t remaining = activeTransfer_.payload.size() - offset;
             const std::size_t dataLen = std::min<std::size_t>(remaining, kMaxChunkDataBytes);
@@ -506,11 +572,21 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
             activeTransfer_.awaitingAck = false;
             activeTransfer_.nextChunkIndex = 0;
             activeTransfer_.retriesForCurrentChunk = 0;
+            Logger::instance().printf("[RAK][TX] reliable start dest=%u ch=%u msgId=%u bytes=%u chunks=%u\n",
+                                      activeTransfer_.dest,
+                                      activeTransfer_.channel,
+                                      activeTransfer_.msgId,
+                                      static_cast<unsigned>(activeTransfer_.payload.size()),
+                                      static_cast<unsigned>(activeTransfer_.chunkCount));
             return;
         }
     }
 
     // 4) Best-effort text messages.
+    if (!canSendNow()) {
+        return;
+    }
+
     OutboundText text;
     {
         Threads::Scope scope(mutex_);
@@ -529,5 +605,21 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
                                   static_cast<unsigned>(len), static_cast<unsigned>(safeLen));
     }
 
-    (void)sendDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, text.dest, text.channel, bytes, safeLen);
+    constexpr std::size_t kPreviewChars = 60;
+    const std::size_t shown = std::min<std::size_t>(safeLen, kPreviewChars);
+
+    Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP dest=%u ch=%u len=%u preview=\"%.*s%s\"\n",
+                              text.dest,
+                              text.channel,
+                              static_cast<unsigned>(safeLen),
+                              static_cast<int>(shown),
+                              text.text.c_str(),
+                              (safeLen > shown) ? "..." : "");
+
+    if (!sendDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, text.dest, text.channel, bytes, safeLen)) {
+        Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP send failed, requeue (pb_size=%u)\n",
+                                  static_cast<unsigned>(pb_size));
+        Threads::Scope scope(mutex_);
+        pendingText_.push_front(std::move(text));
+    }
 }
