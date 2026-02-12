@@ -1,19 +1,15 @@
 #include <Arduino.h>
-#include <core_pins.h>
 #include <USBHost_t36.h>
 #include <TeensyThreads.h>
+#include <cstdint>
 #include <usb_keyboard.h>
-#include <usb_serial.h>
-#include <string>
-
 
 #include "Globals.h"
-#include "KeyHandlers.h"
-#include "InputHandler.h"
 #include "DatabaseManager.h"
+#include "InputHandler.h"
+#include "KeyHandlers.h"
 #include "NlpManager.h"
-#include  "RakManager.h"
-
+#include "RakManager.h"
 
 USBHost myusb;
 USBHub hub1(myusb);
@@ -59,16 +55,19 @@ void setup() {
 
 void loop() {
   if (custom_feature_data_ready) {
+    constexpr std::uint16_t kFeatureReportWithIdLen = 65;
+    constexpr std::uint8_t kCommandA = 0x41;
+
     digitalWrite(13, HIGH);
     custom_feature_data_ready = 0;
 
     // --- SMART OFFSET DETECTION ---
     // If we got 65 bytes, Windows put the Report ID at [0]. Data starts at [1].
     // If we got 64 bytes, Data starts at [0].
-    int data_offset = (custom_feature_len_received == 65) ? 1 : 0;
+    const int dataOffset = (custom_feature_len_received == kFeatureReportWithIdLen) ? 1 : 0;
 
     // Check the data at the calculated offset
-    if (custom_feature_buffer[data_offset] == 0x41) {
+    if (custom_feature_buffer[dataOffset] == kCommandA) {
       Keyboard.println("PC Command A: Triggered!");
     }
 

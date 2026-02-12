@@ -1,16 +1,24 @@
 #ifndef KEYBOARD_KEYBOARDCONFIG_H
 #define KEYBOARD_KEYBOARDCONFIG_H
 
-#include <string>
+#include <cstddef>
+#include <cstdint>
 #include <vector>
+#include <string>
+#include <string_view>
 #include "dbTypes.h"
 
 namespace KeyboardConfig {
-    constexpr int SerialBaudRate = 115200;
-    constexpr int MaxRetries = 5;
-    const std::string MasterTrigger = "jspr vous alez tuos bien";
+    inline constexpr std::uint32_t SerialBaudRate = 115200U;
+    inline constexpr int MaxRetries = 5;
 
-    inline const std::string DBName = "logger.db";
+    namespace Security {
+        inline constexpr std::string_view MasterEnrollmentCommand{"PAIR"};
+        inline constexpr std::string_view MasterEnrollmentSecret{"CHANGE_ME_TO_A_LONG_RANDOM_SECRET"};
+        constexpr std::size_t MinMasterEnrollmentSecretLength = 24;
+    }
+
+    inline constexpr std::string_view DBName{"logger.db"};
 
     namespace Tables {
         inline const DBTable Inputs = {
@@ -44,8 +52,8 @@ namespace KeyboardConfig {
     }
 
     struct NodeInfo {
-        uint32_t id;
-        uint64_t address;
+        std::uint32_t id;
+        std::uint64_t address;
     };
 }
 

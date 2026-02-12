@@ -1,8 +1,65 @@
 #include "RakManager.h"
-#include "NlpManager.h"
 #include "DatabaseManager.h"
+#include "NlpManager.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <string_view>
 
 bool RakManager::not_yet_connected = true;
+
+namespace {
+constexpr std::size_t kMaxEnrollmentMessageLen = 160;
+constexpr char kEnrollmentSeparator = ':';
+constexpr std::string_view kEnrollmentSecretPlaceholder{"CHANGE_ME_TO_A_LONG_RANDOM_SECRET"};
+
+bool constantTimeEquals(const std::string_view lhs, const std::string_view rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+
+    std::uint8_t diff = 0;
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        diff |= static_cast<std::uint8_t>(lhs[i] ^ rhs[i]);
+    }
+
+    return diff == 0;
+}
+
+bool isEnrollmentSecretConfigured() {
+    const auto secret = KeyboardConfig::Security::MasterEnrollmentSecret;
+    return secret.size() >= KeyboardConfig::Security::MinMasterEnrollmentSecretLength &&
+           secret != kEnrollmentSecretPlaceholder;
+}
+
+bool tryExtractEnrollmentSecret(const char* message, std::string& outSecret) {
+    if (message == nullptr) {
+        return false;
+    }
+
+    const std::size_t messageLen = strnlen(message, kMaxEnrollmentMessageLen + 1);
+    if (messageLen == 0 || messageLen > kMaxEnrollmentMessageLen) {
+        return false;
+    }
+
+    const std::string_view messageView{message, messageLen};
+    const std::size_t separatorPos = messageView.find(kEnrollmentSeparator);
+
+    if (separatorPos == std::string_view::npos || separatorPos == 0 || separatorPos + 1 >= messageView.size()) {
+        return false;
+    }
+
+    if (messageView.substr(0, separatorPos) != KeyboardConfig::Security::MasterEnrollmentCommand) {
+        return false;
+    }
+
+    outSecret.assign(messageView.substr(separatorPos + 1));
+    return true;
+}
+}
 
 RakManager& RakManager::getInstance() {
     static RakManager instance;
@@ -16,7 +73,7 @@ RakManager::RakManager() {
 void RakManager::loadSettingsFromDb() {
     this->mastersAddresses = DatabaseManager::getInstance().getRadioNodes();
 
-    Serial.printf("Loaded %d nodes successfully.\n", this->mastersAddresses.size());
+    Serial.printf("Loaded %u nodes successfully.\n", static_cast<unsigned>(this->mastersAddresses.size()));
 }
 
 void RakManager::handleAiCompletion(String topic, float confidence) {
@@ -36,6 +93,9 @@ void RakManager::handleAiCompletion(String topic, float confidence) {
 }
 
 void RakManager::connected_callback(mt_node_t *node, mt_nr_progress_t progress) {
+    (void)node;
+    (void)progress;
+
     if (not_yet_connected)
         Serial.println("Connected to Meshtastic device!");
     not_yet_connected = false;
@@ -76,8 +136,8 @@ const char* RakManager::meshtastic_portnum_to_string(meshtastic_PortNum port) {
 }
 
 void RakManager::displayPubKey(meshtastic_MeshPacket_public_key_t pubKey, char *hex_str) {
-      for (int i = 0; i < 32; i++) {
-          sprintf(&hex_str[i * 2], "%02x", (unsigned char)pubKey.bytes[i]);
+      for (std::size_t i = 0; i < 32; ++i) {
+          std::snprintf(&hex_str[i * 2], 3, "%02x", static_cast<unsigned char>(pubKey.bytes[i]));
       }
 
       hex_str[64] = '\0';
@@ -85,6 +145,10 @@ void RakManager::displayPubKey(meshtastic_MeshPacket_public_key_t pubKey, char *
 
 
 void RakManager::encrypted_callback(uint32_t from, uint32_t to,  uint8_t channel, meshtastic_MeshPacket_public_key_t pubKey, meshtastic_MeshPacket_encrypted_t *enc_payload) {
+  (void)channel;
+  (void)pubKey;
+  (void)enc_payload;
+
   Serial.print("Received an ENCRYPTED callback from: ");
   Serial.print(from);
   Serial.print(" to: ");
@@ -92,12 +156,16 @@ void RakManager::encrypted_callback(uint32_t from, uint32_t to,  uint8_t channel
 }
 
 void RakManager::portnum_callback(uint32_t from, uint32_t to,  uint8_t channel, meshtastic_PortNum portNum, meshtastic_Data_payload_t *payload) {
+  (void)from;
+  (void)to;
+  (void)channel;
+  (void)payload;
+
   Serial.print("Received a callback for PortNum ");
   Serial.println(meshtastic_portnum_to_string(portNum));
 }
 
 void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, const char* text) {
-    // Do your own thing here. This example just prints the message to the serial console.
     Serial.print("Received a text message on channel: ");
     Serial.print(channel);
     Serial.print(" from: ");
@@ -105,49 +173,63 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
     Serial.print(" to: ");
     Serial.print(to);
     Serial.print(" message: ");
-    Serial.println(text);
-    if (to == 0xFFFFFFFF) {
-        auto& instance = RakManager::getInstance();
+    Serial.println(text ? text : "<null>");
 
-        if (text && strstr(text, KeyboardConfig::MasterTrigger.c_str())) {
-            bool exists = false;
-
-            for (const auto& node : instance.mastersAddresses) {
-                Serial.println(node.address);
-                if (node.address == from) {
-                    exists = true;
-                    break;
-                }
-            }
-
-            if (exists) {
-                Serial.println("Master ID Verified!");
-                Serial.println("Id already exists in database");
-            } else {
-                instance.mastersAddresses.push_back({0, from});
-                std::string idStr = std::to_string(from);
-                std::vector<std::string> dataToSave = {idStr};
-                DatabaseManager::getInstance().saveData(dataToSave, KeyboardConfig::Tables::RadioMasters);
-                Serial.printf("Added new Master ID: %u\n", from);
-            }
-        }
-    } else {
-        Serial.println("This is a DM to someone else.");
+    if (text == nullptr) {
+        return;
     }
-    if (strlen(text) > 1) {
+
+    auto& instance = RakManager::getInstance();
+
+    const bool isDirectMessageToThisNode = (my_node_num != 0U) && (to == my_node_num);
+    if (isDirectMessageToThisNode) {
+        std::string suppliedSecret;
+        if (tryExtractEnrollmentSecret(text, suppliedSecret)) {
+            if (!isEnrollmentSecretConfigured()) {
+                Serial.println("[RAK] Enrollment disabled: set a strong MasterEnrollmentSecret in KeyboardConfig.");
+                return;
+            }
+
+            if (!constantTimeEquals(suppliedSecret, KeyboardConfig::Security::MasterEnrollmentSecret)) {
+                Serial.printf("[RAK] Enrollment rejected for node %u: invalid credentials.\n", from);
+                return;
+            }
+
+            const std::uint64_t fromAddress = static_cast<std::uint64_t>(from);
+            const bool alreadyEnrolled = std::any_of(
+                instance.mastersAddresses.cbegin(),
+                instance.mastersAddresses.cend(),
+                [fromAddress](const KeyboardConfig::NodeInfo& node) {
+                    return node.address == fromAddress;
+                });
+
+            if (alreadyEnrolled) {
+                Serial.printf("[RAK] Node %u is already enrolled as master.\n", from);
+            } else {
+                instance.mastersAddresses.push_back({0U, fromAddress});
+                DatabaseManager::getInstance().saveData({std::to_string(from)}, KeyboardConfig::Tables::RadioMasters);
+                Serial.printf("[RAK] Added new master node: %u\n", from);
+            }
+            return;
+        }
+    }
+
+    if (std::strlen(text) > 1) {
         NlpManager::getInstance().analyzeSentence(text);
     }
 }
 
 
 void RakManager::begin() {
+    constexpr std::uint32_t kBootDelayMs = 5'000U;
+    constexpr std::uint32_t kRakSerialBaudRate = 921'600U;
 
     pinMode(0, INPUT);
     pinMode(1, INPUT);
 
     Serial.println("[RAK] Manager Init: Waiting 3 seconds for module to boot...");
-    delay(5000);
-    mt_serial_init(0, 1, 921600);
+    delay(kBootDelayMs);
+    mt_serial_init(0, 1, kRakSerialBaudRate);
 
     mt_request_node_report(connected_callback);
     set_portnum_callback(portnum_callback);
@@ -161,22 +243,24 @@ void RakManager::begin() {
 }
 
 void RakManager::listenerThread(void* arg) {
-    uint32_t lastActionTime = millis();
-    const uint32_t interval = 120000;
+    (void)arg;
+
+    std::uint32_t lastActionTime = millis();
+    constexpr std::uint32_t kHeartbeatIntervalMs = 120'000U;
+    constexpr const char* kHeartbeatText = "Heartbeat";
     auto& instance = RakManager::getInstance();
 
-    while (1) {
+    while (true) {
         mt_loop(millis());
 
-        if (millis() - lastActionTime >= interval) {
+        if (millis() - lastActionTime >= kHeartbeatIntervalMs) {
             lastActionTime = millis();
 
             Serial.println("Sending rak heartbeat to known masters");
-            std::string rakHeartbeatStr = "Heartbeat";
 
             for (const auto& node : instance.mastersAddresses) {
                 Serial.println(node.address);
-                mt_send_text(rakHeartbeatStr.c_str(), node.address, 0);
+                mt_send_text(kHeartbeatText, node.address, 0);
             }
         }
         threads.yield();

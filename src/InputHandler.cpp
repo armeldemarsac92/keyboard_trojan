@@ -1,34 +1,32 @@
 #include <Arduino.h>
-#include <USBHost_t36.h>
 #include <TeensyThreads.h>
-#include <cmath>
-#include <string.h>
-#include <stdio.h>
+#include <cstdint>
 
-#include "AzertyLayout.h"
-#include "DatabaseManager.h"
-#include "Queuing.h"
 #include "DataHelpers.h"
-#include "InputData.h"
+#include "DatabaseManager.h"
 #include "KeyHelper.h"
 #include "LettersBuffer.h"
+#include "Queuing.h"
 #include "StatsBuffer.h"
 #include "../config/KeyboardConfig.h"
 
 static LettersBuffer currentLettersBuffer;
 static StatsBuffer timeDeltaBetweenKeysBuffer;
+namespace {
+constexpr std::uint32_t kWordSplitTimeoutUs = 5'000'000U;
+}
 
 void InputHandlerFunc() {
-
-    uint32_t lastKeyPressTS = 0;
+    std::uint32_t lastKeyPressTS = 0;
     bool pendingSpace = false;
 
     while (true) {
         if (head != tail) {
-            KeyEvent event;
-            event.key = queue[tail].key;
-            event.modifiers = queue[tail].modifiers;
-            event.timestamp = queue[tail].timestamp;
+            const KeyEvent event{
+                queue[tail].key,
+                queue[tail].modifiers,
+                queue[tail].timestamp
+            };
 
             if (KeyHelper::isSystemNoise(event.key)) {
                 tail = (tail + 1) % Q_SIZE;
@@ -36,7 +34,7 @@ void InputHandlerFunc() {
             }
 
             if (lastKeyPressTS == 0) lastKeyPressTS = event.timestamp;
-            uint32_t delta = event.timestamp - lastKeyPressTS;
+            const std::uint32_t delta = event.timestamp - lastKeyPressTS;
 
 
             if (KeyHelper::hasModifier(event.modifiers) && event.key != 0) {
@@ -58,7 +56,7 @@ void InputHandlerFunc() {
                 currentLettersBuffer.clear();
             }
 
-            else if (delta > 5000000 && !currentLettersBuffer.isEmpty() && !pendingSpace) {
+            else if (delta > kWordSplitTimeoutUs && !currentLettersBuffer.isEmpty() && !pendingSpace) {
                  DatabaseManager::getInstance().saveData(
                     DataHelpers::stringifyInputData(currentLettersBuffer, lastKeyPressTS, timeDeltaBetweenKeysBuffer),
                     KeyboardConfig::Tables::Inputs

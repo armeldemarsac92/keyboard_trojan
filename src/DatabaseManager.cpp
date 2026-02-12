@@ -1,11 +1,15 @@
 #include "DatabaseManager.h"
+
+#include <Arduino.h>
+#include <cstdint>
+
 #include "ArduinoSQLiteHandler.h"
 #include "usb_serial.h"
 #include "../config/KeyboardConfig.h"
 
 DatabaseManager::DatabaseManager() {
     setupDatabase();
-    dbConnection = createOpenSQLConnection(KeyboardConfig::DBName.c_str());
+    dbConnection = createOpenSQLConnection(KeyboardConfig::DBName.data());
     createSQLTable(dbConnection, KeyboardConfig::Tables::Inputs);
     createSQLTable(dbConnection, KeyboardConfig::Tables::RadioMasters);
 }
@@ -19,12 +23,9 @@ std::vector<KeyboardConfig::NodeInfo> DatabaseManager::getRadioNodes() {
     std::vector<KeyboardConfig::NodeInfo> results;
 
     this->getData([&results](sqlite3_stmt* row) {
-        uint32_t id = static_cast<uint32_t>(sqlite3_column_int(row, 0));
-
-        uint64_t addr = static_cast<uint64_t>(sqlite3_column_int64(row, 1));
-
+        const std::uint32_t id = static_cast<std::uint32_t>(sqlite3_column_int(row, 0));
+        const std::uint64_t addr = static_cast<std::uint64_t>(sqlite3_column_int64(row, 1));
         results.push_back({id, addr});
-
     }, KeyboardConfig::Tables::RadioMasters);
 
     return results;
@@ -33,58 +34,55 @@ std::vector<KeyboardConfig::NodeInfo> DatabaseManager::getRadioNodes() {
 void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback, const DBTable& table) {
     if (!dbConnection) return;
 
-    queueMutex.lock();
+    Threads::Scope scope(queueMutex);
 
-    std::string tableName = table.tableName;
-    std::string query = "SELECT * FROM " + tableName + ";";
+    const std::string query = "SELECT * FROM " + table.tableName + ";";
+    sqlite3_stmt* stmt = nullptr;
 
-    sqlite3_stmt* stmt;
-
-    if (sqlite3_prepare_v2(dbConnection, query.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            callback(stmt);
-        }
-    } else {
+    const int rc = sqlite3_prepare_v2(dbConnection, query.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
         Serial.printf("Database Read Error: %s\n", sqlite3_errmsg(dbConnection));
+        return;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        callback(stmt);
     }
 
     sqlite3_finalize(stmt);
-
-    queueMutex.unlock();
 }
 
 void DatabaseManager::saveData(const std::vector<std::string>& data, const DBTable& table) {
     if (data.empty()) return;
 
     std::string sqlStatement = buildSQLInsertStatement(table, data);
+    if (sqlStatement.empty()) return;
 
-    queueMutex.lock();
-
+    Threads::Scope scope(queueMutex);
     pendingStatements.push_back(sqlStatement);
-
-    queueMutex.unlock();
 
     Serial.print("QUEUED: ");
     Serial.println(data[0].c_str());
 }
 
 void DatabaseManager::processQueue() {
-    static uint32_t lastWriteTime = 0;
+    static std::uint32_t lastWriteTime = 0;
+    constexpr std::size_t kBatchSize = 20;
+    constexpr std::uint32_t kMaxFlushDelayMs = 60'000;
+
     std::vector<std::string> batchToSave;
 
-    queueMutex.lock();
+    {
+        Threads::Scope scope(queueMutex);
+        const bool shouldWrite = (pendingStatements.size() >= kBatchSize) ||
+                                 (!pendingStatements.empty() && (millis() - lastWriteTime > kMaxFlushDelayMs));
+        if (!shouldWrite) {
+            return;
+        }
 
-    bool shouldWrite = (pendingStatements.size() >= 20) ||
-                       (!pendingStatements.empty() && (millis() - lastWriteTime > 60000));
-
-    if (!shouldWrite) {
-        queueMutex.unlock();
-        return;
+        batchToSave = std::move(pendingStatements);
+        pendingStatements.clear();
     }
-
-    batchToSave = std::move(pendingStatements);
-    pendingStatements.clear();
-    queueMutex.unlock();
 
     if (!batchToSave.empty()) {
         executeSQLTransaction(dbConnection, batchToSave);

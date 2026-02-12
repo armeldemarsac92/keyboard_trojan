@@ -1,10 +1,12 @@
 #include "StatsBuffer.h"
 
+#include <numeric>
+
 StatsBuffer::StatsBuffer() {
     intervals.reserve(MAX_CAPACITY);
 }
 
-void StatsBuffer::add(uint32_t interval) {
+void StatsBuffer::add(std::uint32_t interval) {
     if (intervals.size() < MAX_CAPACITY) {
         intervals.push_back(interval);
     }
@@ -20,7 +22,7 @@ void StatsBuffer::clear() {
     intervals.clear();
 }
 
-const std::vector<uint32_t>& StatsBuffer::getIntervals() const {
+const std::vector<std::uint32_t>& StatsBuffer::getIntervals() const {
     return intervals;
 }
 
@@ -28,25 +30,25 @@ bool StatsBuffer::isEmpty() const {
     return intervals.empty();
 }
 
-// --- Math Logic (Now converts to Seconds) ---
+// --- Math Logic (raw intervals are measured in microseconds) ---
 
 float StatsBuffer::getAverage() const {
     if (intervals.empty()) return 0.0f;
 
-    // 1. Calculate Sum in raw Milliseconds
+    // 1. Calculate sum in raw microseconds
     double sum = std::accumulate(intervals.begin(), intervals.end(), 0.0);
 
-    // 2. Calculate Raw Average (ms)
+    // 2. Calculate raw average (us)
     double rawAvg = sum / intervals.size();
 
-    // 3. Convert to Seconds (1000 ms = 1.0 s)
+    // 3. Convert to seconds
     return (float)(rawAvg / 1000000.0);
 }
 
 float StatsBuffer::getVariance() const {
     if (intervals.size() < 2) return 0.0f;
 
-    // NOTE: We calculate variance on the raw data (ms) first to preserve precision,
+    // NOTE: We calculate variance on the raw data (us) first to preserve precision,
     // then convert the final result to seconds^2.
 
     double sum = std::accumulate(intervals.begin(), intervals.end(), 0.0);
@@ -54,15 +56,14 @@ float StatsBuffer::getVariance() const {
 
     double sumSqDiff = 0.0;
 
-    for (uint32_t val : intervals) {
+    for (std::uint32_t val : intervals) {
         double diff = val - rawMean;
         sumSqDiff += diff * diff;
     }
 
     double rawVariance = sumSqDiff / intervals.size();
 
-    // Convert ms^2 to s^2
-    // (1 ms)^2 = (0.001 s)^2 = 0.000001 s^2
-    // So we divide by 1,000,000
-    return (float)(rawVariance / 1000000000.0);
+    // Convert us^2 to s^2:
+    // (1 us)^2 = (1e-6 s)^2 = 1e-12 s^2
+    return (float)(rawVariance / 1000000000000.0);
 }
