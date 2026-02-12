@@ -113,20 +113,36 @@ std::vector<std::uint8_t> buildAckFrame(std::uint32_t msgId, std::uint16_t chunk
     return frame;
 }
 
-std::vector<std::uint8_t> buildDataFrame(std::uint32_t msgId, std::uint16_t chunkIndex, std::uint16_t chunkCount,
-                                        std::uint32_t totalLen, const std::uint8_t* data, std::size_t dataLen) {
-    std::vector<std::uint8_t> frame(kHeaderLen + dataLen);
+std::size_t writeDataFrame(std::uint32_t msgId, std::uint16_t chunkIndex, std::uint16_t chunkCount,
+                           std::uint32_t totalLen, const std::uint8_t* data, std::size_t dataLen, std::uint8_t* out,
+                           std::size_t outLen) {
+    if (out == nullptr) {
+        return 0;
+    }
+
+    if (data == nullptr && dataLen != 0) {
+        return 0;
+    }
+
+    if (outLen < kHeaderLen + dataLen) {
+        return 0;
+    }
+
     FrameHeader h;
     h.type = FrameType::Data;
     h.msgId = msgId;
     h.chunkIndex = chunkIndex;
     h.chunkCount = chunkCount;
     h.totalLen = totalLen;
-    (void)encodeHeader(h, frame.data(), frame.size());
-    if (dataLen > 0 && data != nullptr) {
-        std::memcpy(frame.data() + kHeaderLen, data, dataLen);
+    if (!encodeHeader(h, out, outLen)) {
+        return 0;
     }
-    return frame;
+
+    if (dataLen > 0) {
+        std::memcpy(out + kHeaderLen, data, dataLen);
+    }
+
+    return kHeaderLen + dataLen;
 }
 
 bool canSendNow() {
@@ -429,13 +445,17 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
             const std::size_t remaining = activeTransfer_.payload.size() - offset;
             const std::size_t dataLen = std::min<std::size_t>(remaining, kMaxChunkDataBytes);
 
-            const auto frame =
-                buildDataFrame(activeTransfer_.msgId, activeTransfer_.nextChunkIndex, activeTransfer_.chunkCount,
+            std::array<std::uint8_t, kMaxDecodedPayloadBytes> frame{};
+            const std::size_t frameLen =
+                writeDataFrame(activeTransfer_.msgId, activeTransfer_.nextChunkIndex, activeTransfer_.chunkCount,
                                static_cast<std::uint32_t>(activeTransfer_.payload.size()),
-                               activeTransfer_.payload.data() + offset, dataLen);
+                               activeTransfer_.payload.data() + offset, dataLen, frame.data(), frame.size());
+            if (frameLen == 0) {
+                return;
+            }
 
             if (sendDecodedPacket(meshtastic_PortNum_PRIVATE_APP, activeTransfer_.dest, activeTransfer_.channel,
-                                  frame.data(), frame.size())) {
+                                  frame.data(), frameLen)) {
                 activeTransfer_.lastSendMs = nowMs;
                 activeTransfer_.retriesForCurrentChunk =
                     static_cast<std::uint8_t>(activeTransfer_.retriesForCurrentChunk + 1);
@@ -452,13 +472,17 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
         const std::size_t remaining = activeTransfer_.payload.size() - offset;
         const std::size_t dataLen = std::min<std::size_t>(remaining, kMaxChunkDataBytes);
 
-        const auto frame =
-            buildDataFrame(activeTransfer_.msgId, activeTransfer_.nextChunkIndex, activeTransfer_.chunkCount,
+        std::array<std::uint8_t, kMaxDecodedPayloadBytes> frame{};
+        const std::size_t frameLen =
+            writeDataFrame(activeTransfer_.msgId, activeTransfer_.nextChunkIndex, activeTransfer_.chunkCount,
                            static_cast<std::uint32_t>(activeTransfer_.payload.size()),
-                           activeTransfer_.payload.data() + offset, dataLen);
+                           activeTransfer_.payload.data() + offset, dataLen, frame.data(), frame.size());
+        if (frameLen == 0) {
+            return;
+        }
 
         if (sendDecodedPacket(meshtastic_PortNum_PRIVATE_APP, activeTransfer_.dest, activeTransfer_.channel,
-                              frame.data(), frame.size())) {
+                              frame.data(), frameLen)) {
             activeTransfer_.awaitingAck = true;
             activeTransfer_.lastSendMs = nowMs;
         }

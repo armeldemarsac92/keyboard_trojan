@@ -145,6 +145,10 @@ Stop-and-wait per chunk (single active transfer at a time):
 - Receiver ACKs each received chunk (idempotent ACK for duplicates).
 - Receiver reassembles chunks and emits `payloadCompleteCb_` when all chunks are present.
 
+Implementation note:
+
+- Outbound DATA frames are encoded into a fixed-size stack buffer (`233` bytes) to avoid heap allocations during the send loop.
+
 ### Frame Format (PRIVATE_APP, binary, v1)
 
 All frames are carried in `MeshPacket.decoded.payload` with `decoded.portnum = PRIVATE_APP`.
