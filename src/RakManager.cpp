@@ -187,8 +187,11 @@ void RakManager::portnum_callback(uint32_t from, uint32_t to,  uint8_t channel, 
     auto& instance = RakManager::getInstance();
     instance.transport_.onPortnumPacket(from, to, channel, portNum, payload);
 
-    Logger::instance().print("Received a callback for PortNum ");
-    Logger::instance().println(meshtastic_portnum_to_string(portNum));
+    // Meshtastic nodes emit TELEMETRY_APP periodically; logging every packet is noisy and can impact timing.
+    if (portNum != meshtastic_PortNum_TELEMETRY_APP) {
+        Logger::instance().print("Received a callback for PortNum ");
+        Logger::instance().println(meshtastic_portnum_to_string(portNum));
+    }
 }
 
 void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, const char* text) {
