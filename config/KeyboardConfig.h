@@ -26,7 +26,8 @@ namespace KeyboardConfig {
             {
                 {"InputID", "INTEGER PRIMARY KEY", true},
                 {"Input", "TEXT"},
-                {"Timestamp", "TEXT"},
+                // Store timestamps as seconds (floating-point) for consistency across durations.
+                {"Timestamp", "REAL"},
                 {"Variance", "REAL"},
                 {"AvgDelayBetweenStrokes", "REAL"},
                 {"Entropy", "REAL"}
