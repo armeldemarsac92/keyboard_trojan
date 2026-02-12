@@ -91,6 +91,12 @@ bool isAsciiWhitespace(char c) {
 }
 
 const char* routingErrorToString(meshtastic_Routing_Error err) {
+    // Newer Meshtastic protobufs might emit values we don't have in our older generated enum.
+    // Avoid putting those integers in a switch() to keep -Wswitch clean.
+    const int v = static_cast<int>(err);
+    if (v == 38) return "RATE_LIMIT_EXCEEDED";
+    if (v == 39) return "PKI_SEND_FAIL_PUBLIC_KEY";
+
     switch (err) {
         case meshtastic_Routing_Error_NONE: return "NONE";
         case meshtastic_Routing_Error_NO_ROUTE: return "NO_ROUTE";
@@ -112,11 +118,58 @@ const char* routingErrorToString(meshtastic_Routing_Error err) {
     }
 }
 
+const char* priorityToString(meshtastic_MeshPacket_Priority p) {
+    switch (p) {
+        case meshtastic_MeshPacket_Priority_UNSET: return "UNSET";
+        case meshtastic_MeshPacket_Priority_BACKGROUND: return "BACKGROUND";
+        case meshtastic_MeshPacket_Priority_DEFAULT: return "DEFAULT";
+        case meshtastic_MeshPacket_Priority_RELIABLE: return "RELIABLE";
+        case meshtastic_MeshPacket_Priority_RESPONSE: return "RESPONSE";
+        case meshtastic_MeshPacket_Priority_HIGH: return "HIGH";
+        case meshtastic_MeshPacket_Priority_ALERT: return "ALERT";
+        case meshtastic_MeshPacket_Priority_ACK: return "ACK";
+        case meshtastic_MeshPacket_Priority_MIN: return "MIN";
+        case meshtastic_MeshPacket_Priority_MAX: return "MAX";
+        default: return "UNKNOWN";
+    }
+}
+
+const meshtastic_Data* tryGetDataFromPayload(const meshtastic_Data_payload_t* payload) {
+    if (payload == nullptr) {
+        return nullptr;
+    }
+
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(payload);
+    const auto* data = reinterpret_cast<const meshtastic_Data*>(bytes - offsetof(meshtastic_Data, payload));
+    if (&data->payload != payload) {
+        return nullptr;
+    }
+
+    return data;
+}
+
+const meshtastic_MeshPacket* tryGetMeshPacketFromData(const meshtastic_Data* data) {
+    if (data == nullptr) {
+        return nullptr;
+    }
+
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(data);
+    const auto* pkt = reinterpret_cast<const meshtastic_MeshPacket*>(bytes - offsetof(meshtastic_MeshPacket, decoded));
+    if (&pkt->decoded != data) {
+        return nullptr;
+    }
+
+    return pkt;
+}
+
 void logRoutingAppPacket(uint32_t from, uint32_t to, uint8_t channel, const meshtastic_Data_payload_t* payload) {
     if (payload == nullptr) {
         Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u (null payload)\n", from, to, channel);
         return;
     }
+
+    const meshtastic_Data* data = tryGetDataFromPayload(payload);
+    const meshtastic_MeshPacket* pkt = tryGetMeshPacketFromData(data);
 
     const std::size_t len = payload->size;
     if (len == 0) {
@@ -146,10 +199,14 @@ void logRoutingAppPacket(uint32_t from, uint32_t to, uint8_t channel, const mesh
 
     switch (routing.which_variant) {
         case meshtastic_Routing_route_request_tag: {
-            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=route_request hops=%u\n",
+            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=route_request pktId=%u reqId=%u pri=%s(%u) hops=%u\n",
                                       from,
                                       to,
                                       channel,
+                                      pkt ? pkt->id : 0U,
+                                      data ? data->request_id : 0U,
+                                      pkt ? priorityToString(pkt->priority) : "UNKNOWN",
+                                      pkt ? static_cast<unsigned>(pkt->priority) : 0U,
                                       static_cast<unsigned>(routing.route_request.route_count));
 
             Logger::instance().print("[RAK][ROUTING] route=");
@@ -162,10 +219,14 @@ void logRoutingAppPacket(uint32_t from, uint32_t to, uint8_t channel, const mesh
         }
 
         case meshtastic_Routing_route_reply_tag: {
-            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=route_reply hops=%u back_hops=%u\n",
+            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=route_reply pktId=%u reqId=%u pri=%s(%u) hops=%u back_hops=%u\n",
                                       from,
                                       to,
                                       channel,
+                                      pkt ? pkt->id : 0U,
+                                      data ? data->request_id : 0U,
+                                      pkt ? priorityToString(pkt->priority) : "UNKNOWN",
+                                      pkt ? static_cast<unsigned>(pkt->priority) : 0U,
                                       static_cast<unsigned>(routing.route_reply.route_count),
                                       static_cast<unsigned>(routing.route_reply.route_back_count));
 
@@ -189,10 +250,14 @@ void logRoutingAppPacket(uint32_t from, uint32_t to, uint8_t channel, const mesh
         }
 
         case meshtastic_Routing_error_reason_tag: {
-            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=error reason=%s(%d)\n",
+            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=error pktId=%u reqId=%u pri=%s(%u) reason=%s(%d)\n",
                                       from,
                                       to,
                                       channel,
+                                      pkt ? pkt->id : 0U,
+                                      data ? data->request_id : 0U,
+                                      pkt ? priorityToString(pkt->priority) : "UNKNOWN",
+                                      pkt ? static_cast<unsigned>(pkt->priority) : 0U,
                                       routingErrorToString(routing.error_reason),
                                       static_cast<int>(routing.error_reason));
             return;
