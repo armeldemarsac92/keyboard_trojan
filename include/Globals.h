@@ -2,7 +2,6 @@
 #define GLOBALS_H
 
 #include <USBHost_t36.h>
-#include <TeensyThreads.h>
 
 // --- Global Object Declarations ---
 // These allow all files to access the USB devices

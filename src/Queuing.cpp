@@ -1,7 +1,5 @@
 #include "Queuing.h"
 
-#include <core_pins.h>
-
 volatile KeyEvent queue[Q_SIZE];
 volatile int head = 0;
 volatile int tail = 0;

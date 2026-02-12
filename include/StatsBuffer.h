@@ -1,22 +1,21 @@
 #pragma once
-#include <vector>
+#include <cstddef>
 #include <cstdint>
-#include <numeric> // For math functions
-#include <cmath>   // For std::sqrt
+#include <vector>
 
 class StatsBuffer {
 private:
-    static const size_t MAX_CAPACITY = 100;
-    std::vector<uint32_t> intervals;
+    static constexpr std::size_t MAX_CAPACITY = 100;
+    std::vector<std::uint32_t> intervals;
 
 public:
     StatsBuffer();
 
-    void add(uint32_t interval);
+    void add(std::uint32_t interval);
     void backspace();
     void clear();
 
-    const std::vector<uint32_t>& getIntervals() const;
+    const std::vector<std::uint32_t>& getIntervals() const;
     bool isEmpty() const;
 
     float getAverage() const;

@@ -1,6 +1,7 @@
 #ifndef KEYHANDLERS_H
 #define KEYHANDLERS_H
 
+#include <cstdint>
 #include <USBHost_t36.h>
 
 // --- Function Declarations ---

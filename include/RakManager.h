@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <Meshtastic.h>
 #include <TeensyThreads.h>
+#include <cstdint>
+#include <vector>
 
 #include "../config/KeyboardConfig.h"
 

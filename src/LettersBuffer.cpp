@@ -9,7 +9,7 @@ LettersBuffer::LettersBuffer() {
     buffer.reserve(MAX_LEN);
 }
 
-bool LettersBuffer::addChar(char keyCode, uint8_t modifier) {
+bool LettersBuffer::addChar(char keyCode, std::uint8_t modifier) {
     if (keyCode == 0) return false;
 
     if (buffer.length() >= MAX_LEN) {
@@ -26,7 +26,7 @@ bool LettersBuffer::addChar(char keyCode, uint8_t modifier) {
     return true;
 }
 
-bool LettersBuffer::addShortcut(char keyCode, uint8_t modifier) {
+bool LettersBuffer::addShortcut(char keyCode, std::uint8_t modifier) {
     std::string shortcut = AzertyLayout::getShortcutName(keyCode, modifier);
 
     if (shortcut.empty()) return false;

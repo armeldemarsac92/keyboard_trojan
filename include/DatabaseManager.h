@@ -1,14 +1,9 @@
 #pragma once
 
-// ✅ CRITICAL: Arduino.h must be first to define yield(), millis(), etc.
-#include <Arduino.h>
-
-#include <vector>
+#include <functional>
 #include <string>
-
-// ✅ REMOVED: #include <mutex> (This caused the conflict!)
-
-#include <TeensyThreads.h> // for Threads::Mutex
+#include <vector>
+#include <TeensyThreads.h>
 #include "ArduinoSQLiteHandler.h"
 
 namespace KeyboardConfig {
@@ -18,9 +13,7 @@ namespace KeyboardConfig {
 class DatabaseManager {
 private:
     std::vector<std::string> pendingStatements;
-    sqlite3* dbConnection;
-
-    // The Mutex from TeensyThreads
+    sqlite3* dbConnection = nullptr;
     Threads::Mutex queueMutex;
 
     DatabaseManager();
@@ -30,11 +23,11 @@ private:
 
 public:
     DatabaseManager(const DatabaseManager&) = delete;
-    void operator=(const DatabaseManager&) = delete;
+    DatabaseManager& operator=(const DatabaseManager&) = delete;
 
     static DatabaseManager& getInstance();
     void cleanupDuplicates();
-    std::vector<KeyboardConfig::NodeInfo> getRadioNodes();
+    [[nodiscard]] std::vector<KeyboardConfig::NodeInfo> getRadioNodes();
     void saveData(const std::vector<std::string>& data, const DBTable& table);
     void processQueue();
 };

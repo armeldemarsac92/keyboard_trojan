@@ -1,9 +1,9 @@
 #pragma once
-#include <stdint.h>
+#include <cstdint>
 
 struct InputData {
     char word[256];
-    uint32_t timestamp;
+    std::uint32_t timestamp;
     float avgInterval;
     float variance;
     float entropy;
