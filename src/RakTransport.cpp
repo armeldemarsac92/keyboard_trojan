@@ -98,13 +98,13 @@ bool tryParseHeader(const std::uint8_t* in, std::size_t inLen, FrameHeader& out)
     out.msgId = readLe32(in + 4);
     out.chunkIndex = readLe16(in + 8);
     out.chunkCount = readLe16(in + 10);
-    out.totalLen = readLe32(in + 12);
-    return true;
-}
+	    out.totalLen = readLe32(in + 12);
+	    return true;
+	}
 
-std::vector<std::uint8_t> buildAckFrame(std::uint32_t msgId, std::uint16_t chunkIndex, std::uint16_t chunkCount,
-                                       std::uint32_t totalLen) {
-    std::vector<std::uint8_t> frame(kHeaderLen);
+	std::vector<std::uint8_t> buildAckFrame(std::uint32_t msgId, std::uint16_t chunkIndex, std::uint16_t chunkCount,
+	                                       std::uint32_t totalLen) {
+	    std::vector<std::uint8_t> frame(kHeaderLen);
     FrameHeader h;
     h.type = FrameType::Ack;
     h.msgId = msgId;
