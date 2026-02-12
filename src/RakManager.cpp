@@ -90,6 +90,126 @@ bool isAsciiWhitespace(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
+const char* routingErrorToString(meshtastic_Routing_Error err) {
+    switch (err) {
+        case meshtastic_Routing_Error_NONE: return "NONE";
+        case meshtastic_Routing_Error_NO_ROUTE: return "NO_ROUTE";
+        case meshtastic_Routing_Error_GOT_NAK: return "GOT_NAK";
+        case meshtastic_Routing_Error_TIMEOUT: return "TIMEOUT";
+        case meshtastic_Routing_Error_NO_INTERFACE: return "NO_INTERFACE";
+        case meshtastic_Routing_Error_MAX_RETRANSMIT: return "MAX_RETRANSMIT";
+        case meshtastic_Routing_Error_NO_CHANNEL: return "NO_CHANNEL";
+        case meshtastic_Routing_Error_TOO_LARGE: return "TOO_LARGE";
+        case meshtastic_Routing_Error_NO_RESPONSE: return "NO_RESPONSE";
+        case meshtastic_Routing_Error_DUTY_CYCLE_LIMIT: return "DUTY_CYCLE_LIMIT";
+        case meshtastic_Routing_Error_BAD_REQUEST: return "BAD_REQUEST";
+        case meshtastic_Routing_Error_NOT_AUTHORIZED: return "NOT_AUTHORIZED";
+        case meshtastic_Routing_Error_PKI_FAILED: return "PKI_FAILED";
+        case meshtastic_Routing_Error_PKI_UNKNOWN_PUBKEY: return "PKI_UNKNOWN_PUBKEY";
+        case meshtastic_Routing_Error_ADMIN_BAD_SESSION_KEY: return "ADMIN_BAD_SESSION_KEY";
+        case meshtastic_Routing_Error_ADMIN_PUBLIC_KEY_UNAUTHORIZED: return "ADMIN_PUBLIC_KEY_UNAUTHORIZED";
+        default: return "UNKNOWN";
+    }
+}
+
+void logRoutingAppPacket(uint32_t from, uint32_t to, uint8_t channel, const meshtastic_Data_payload_t* payload) {
+    if (payload == nullptr) {
+        Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u (null payload)\n", from, to, channel);
+        return;
+    }
+
+    const std::size_t len = payload->size;
+    if (len == 0) {
+        Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u (empty)\n", from, to, channel);
+        return;
+    }
+
+    meshtastic_Routing routing = meshtastic_Routing_init_zero;
+    pb_istream_t stream = pb_istream_from_buffer(payload->bytes, len);
+    if (!pb_decode(&stream, meshtastic_Routing_fields, &routing)) {
+        constexpr std::size_t kMaxHex = 12;
+        const std::size_t shown = std::min<std::size_t>(len, kMaxHex);
+
+        Logger::instance().printf("[RAK][ROUTING] decode failed: %s (len=%u)\n",
+                                  PB_GET_ERROR(&stream),
+                                  static_cast<unsigned>(len));
+
+        Logger::instance().print("[RAK][ROUTING] bytes=");
+        for (std::size_t i = 0; i < shown; ++i) {
+            Logger::instance().printf("%02X", static_cast<unsigned>(payload->bytes[i]));
+            if (i + 1 < shown) Logger::instance().print(" ");
+        }
+        if (len > shown) Logger::instance().print(" ...");
+        Logger::instance().println();
+        return;
+    }
+
+    switch (routing.which_variant) {
+        case meshtastic_Routing_route_request_tag: {
+            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=route_request hops=%u\n",
+                                      from,
+                                      to,
+                                      channel,
+                                      static_cast<unsigned>(routing.route_request.route_count));
+
+            Logger::instance().print("[RAK][ROUTING] route=");
+            for (std::size_t i = 0; i < routing.route_request.route_count; ++i) {
+                Logger::instance().print(routing.route_request.route[i]);
+                if (i + 1 < routing.route_request.route_count) Logger::instance().print("->");
+            }
+            Logger::instance().println();
+            return;
+        }
+
+        case meshtastic_Routing_route_reply_tag: {
+            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=route_reply hops=%u back_hops=%u\n",
+                                      from,
+                                      to,
+                                      channel,
+                                      static_cast<unsigned>(routing.route_reply.route_count),
+                                      static_cast<unsigned>(routing.route_reply.route_back_count));
+
+            Logger::instance().print("[RAK][ROUTING] route=");
+            for (std::size_t i = 0; i < routing.route_reply.route_count; ++i) {
+                Logger::instance().print(routing.route_reply.route[i]);
+                if (i + 1 < routing.route_reply.route_count) Logger::instance().print("->");
+            }
+            Logger::instance().println();
+
+            if (routing.route_reply.route_back_count > 0) {
+                Logger::instance().print("[RAK][ROUTING] back=");
+                for (std::size_t i = 0; i < routing.route_reply.route_back_count; ++i) {
+                    Logger::instance().print(routing.route_reply.route_back[i]);
+                    if (i + 1 < routing.route_reply.route_back_count) Logger::instance().print("->");
+                }
+                Logger::instance().println();
+            }
+
+            return;
+        }
+
+        case meshtastic_Routing_error_reason_tag: {
+            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=error reason=%s(%d)\n",
+                                      from,
+                                      to,
+                                      channel,
+                                      routingErrorToString(routing.error_reason),
+                                      static_cast<int>(routing.error_reason));
+            return;
+        }
+
+        default: {
+            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=unknown (%u) len=%u\n",
+                                      from,
+                                      to,
+                                      channel,
+                                      static_cast<unsigned>(routing.which_variant),
+                                      static_cast<unsigned>(len));
+            return;
+        }
+    }
+}
+
 std::string_view trimLeft(std::string_view s) {
     while (!s.empty() && isAsciiWhitespace(s.front())) {
         s.remove_prefix(1);
@@ -314,6 +434,11 @@ void RakManager::encrypted_callback(uint32_t from, uint32_t to,  uint8_t channel
 void RakManager::portnum_callback(uint32_t from, uint32_t to,  uint8_t channel, meshtastic_PortNum portNum, meshtastic_Data_payload_t *payload) {
     auto& instance = RakManager::getInstance();
     instance.transport_.onPortnumPacket(from, to, channel, portNum, payload);
+
+    if (portNum == meshtastic_PortNum_ROUTING_APP) {
+        logRoutingAppPacket(from, to, channel, payload);
+        return;
+    }
 
     // Meshtastic nodes emit TELEMETRY_APP periodically; logging every packet is noisy and can impact timing.
     if (portNum != meshtastic_PortNum_TELEMETRY_APP) {
