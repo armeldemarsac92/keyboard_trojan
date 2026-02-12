@@ -302,6 +302,26 @@ bool executeInsertTransaction(sqlite3* db, const Inserts& inserts) {
     finalizePrepared(prepared);
     return true;
 }
+
+void migrateInputTimestampsToSeconds(sqlite3* db) {
+    if (db == nullptr) {
+        return;
+    }
+
+    // Historical rows used to store `micros()` directly (microseconds). We now store seconds.
+    // `micros()` is a 32-bit counter (wraps at ~4294 seconds), therefore any timestamp >10k cannot be valid
+    // seconds-based data and is safe to convert from microseconds.
+    const std::string sql = "UPDATE " + KeyboardConfig::Tables::Inputs.tableName +
+                            " SET Timestamp = CAST(Timestamp AS REAL) / 1000000.0"
+                            " WHERE CAST(Timestamp AS REAL) > 10000.0;";
+
+    char* errMsg = nullptr;
+    const int rc = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        Logger::instance().printf("[DB] Timestamp migration failed: %s\n", errMsg ? errMsg : "<null>");
+        sqlite3_free(errMsg);
+    }
+}
 }  // namespace
 
 DatabaseManager::DatabaseManager() {
@@ -309,6 +329,7 @@ DatabaseManager::DatabaseManager() {
     dbConnection = createOpenSQLConnection(KeyboardConfig::DBName.data());
     createSQLTable(dbConnection, KeyboardConfig::Tables::Inputs);
     createSQLTable(dbConnection, KeyboardConfig::Tables::RadioMasters);
+    migrateInputTimestampsToSeconds(dbConnection);
 }
 
 DatabaseManager& DatabaseManager::getInstance() {
@@ -364,16 +385,21 @@ void DatabaseManager::saveData(std::vector<std::string> data, const DBTable& tab
 
 void DatabaseManager::processQueue() {
     static std::uint32_t lastWriteTime = 0;
+    static std::uint32_t lastFailureTime = 0;
     constexpr std::size_t kBatchSize = 20;
     constexpr std::uint32_t kMaxFlushDelayMs = 60'000;
+    constexpr std::uint32_t kFailureBackoffMs = 5'000;
 
     std::vector<PendingInsert> batchToSave;
 
     {
+        const std::uint32_t now = millis();
         Threads::Scope scope(queueMutex);
+
+        const bool backoffActive = (lastFailureTime != 0U) && (now - lastFailureTime < kFailureBackoffMs);
         const bool shouldWrite = (pendingInserts_.size() >= kBatchSize) ||
-                                 (!pendingInserts_.empty() && (millis() - lastWriteTime > kMaxFlushDelayMs));
-        if (!shouldWrite) {
+                                 (!pendingInserts_.empty() && (now - lastWriteTime > kMaxFlushDelayMs));
+        if (!shouldWrite || backoffActive) {
             return;
         }
 
@@ -382,6 +408,7 @@ void DatabaseManager::processQueue() {
     }
 
     if (!batchToSave.empty()) {
+        const std::uint32_t now = millis();
         const bool ok = executeInsertTransaction(dbConnection, batchToSave);
         if (!ok) {
             Logger::instance().println("[DB] Transaction failed, re-queueing rows.");
@@ -389,7 +416,10 @@ void DatabaseManager::processQueue() {
             pendingInserts_.insert(pendingInserts_.begin(),
                                    std::make_move_iterator(batchToSave.begin()),
                                    std::make_move_iterator(batchToSave.end()));
+            lastFailureTime = now;
+        } else {
+            lastFailureTime = 0;
         }
-        lastWriteTime = millis();
+        lastWriteTime = now;
     }
 }
