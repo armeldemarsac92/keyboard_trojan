@@ -79,6 +79,20 @@ Observation: `FromRadio.queueStatus` and `FromRadio.clientNotification` exist in
 
 This matters because `QueueStatus.mesh_packet_id` could be a useful hook for low-level send/queue confirmation if we choose to integrate it.
 
+### Critical constraint: global protobuf buffer (thread-safety + reentrancy)
+
+In `mt_protocol.cpp`:
+
+- The library uses a single global `pb_buf` for both encode and decode, and a global `pb_size` for the receive FIFO.
+- `_mt_send_toRadio(...)` **overwrites** `pb_buf` and sets `pb_size = 0`.
+
+Implications:
+
+- The library is not thread-safe: sending from one thread while `mt_loop()` decodes in another can corrupt state.
+- Sending from within a Meshtastic receive callback (which runs inside `mt_loop()`) can drop/corrupt any remaining bytes in the input buffer.
+
+Therefore: all Meshtastic send operations should be serialized on one thread, and sends should not occur inside receive callbacks. Queue outbound frames and send them after `mt_loop()` returns.
+
 ## Protobuf Fields Relevant To Reliability
 
 From `Keyboard/.pio/libdeps/teensy41/Meshtastic/protobufs/meshtastic/mesh.proto`:
@@ -163,4 +177,3 @@ Option (2) is cleaner but larger change (maintaining a fork/vendored lib).
    - `mt_send_private_bytes(dest, channel, bytes)` with strict bounds checks
    - fragmenter + reassembler + ACK/retry logic
    - integrate into `RakManager::portnum_callback` for `PRIVATE_APP`
-
