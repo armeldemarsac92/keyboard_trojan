@@ -281,9 +281,11 @@ bool DatabaseManager::countRows(const DBTable& table, std::uint32_t& outCount) {
     outCount = 0;
 
     if (!dbConnection || !dbAvailable_) {
+        Logger::instance().println("[DB][Q] COUNT: db unavailable");
         return false;
     }
 
+    Logger::instance().printf("[DB][Q] COUNT %s\n", table.tableName.c_str());
     Threads::Scope scope(dbMutex_);
 
     const std::string sql = "SELECT COUNT(*) FROM " + table.tableName + ";";
@@ -309,12 +311,14 @@ bool DatabaseManager::countRows(const DBTable& table, std::uint32_t& outCount) {
     }
 
     sqlite3_finalize(stmt);
+    Logger::instance().printf("[DB][Q] COUNT %s => %u\n", table.tableName.c_str(), static_cast<unsigned>(outCount));
     return true;
 }
 
 std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
     std::vector<std::string> lines;
     if (!dbConnection || !dbAvailable_) {
+        Logger::instance().println("[DB][Q] TAIL Inputs: db unavailable");
         return lines;
     }
 
@@ -325,6 +329,7 @@ std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
         return lines;
     }
 
+    Logger::instance().printf("[DB][Q] TAIL Inputs limit=%u\n", static_cast<unsigned>(limit));
     Threads::Scope scope(dbMutex_);
 
     sqlite3_stmt* stmt = nullptr;
@@ -365,5 +370,6 @@ std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
     }
 
     sqlite3_finalize(stmt);
+    Logger::instance().printf("[DB][Q] TAIL Inputs returned=%u\n", static_cast<unsigned>(lines.size()));
     return lines;
 }

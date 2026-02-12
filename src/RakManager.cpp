@@ -340,8 +340,11 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
 
     const bool isDirectMessageToThisNode = (my_node_num != 0U) && (to == my_node_num);
     if (isDirectMessageToThisNode) {
+        Logger::instance().printf("[RAK][DM] from=%u channel=%u\n", from, channel);
+
         std::string suppliedSecret;
         if (tryExtractEnrollmentSecret(text, suppliedSecret)) {
+            Logger::instance().printf("[RAK][PAIR] request from=%u\n", from);
             if (!isEnrollmentSecretConfigured()) {
                 Logger::instance().println("[RAK] Enrollment disabled: set a strong MasterEnrollmentSecret in KeyboardConfig.");
                 return;
@@ -386,6 +389,14 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
                 asciiIEquals(cmd.name, "HELP") || asciiIEquals(cmd.name, "QUERY") || asciiIEquals(cmd.name, "TABLES") ||
                 asciiIEquals(cmd.name, "SCHEMA") || asciiIEquals(cmd.name, "COUNT") || asciiIEquals(cmd.name, "TAIL");
             if (known) {
+                Logger::instance().printf("[RAK][CMD] queued from=%u cmd=%.*s arg0=%.*s arg1=%.*s\n",
+                                          from,
+                                          static_cast<int>(cmd.name.size()),
+                                          cmd.name.data(),
+                                          static_cast<int>(cmd.arg0.size()),
+                                          cmd.arg0.data(),
+                                          static_cast<int>(cmd.arg1.size()),
+                                          cmd.arg1.data());
                 instance.enqueueCommand(from, to, channel, text);
                 return;
             }
@@ -403,6 +414,7 @@ void RakManager::enqueueCommand(uint32_t from, uint32_t to, uint8_t channel, con
     }
 
     constexpr std::size_t kMaxPendingCommands = 8;
+    constexpr std::size_t kMaxLoggedChars = 80;
 
     PendingCommand cmd;
     cmd.from = from;
@@ -414,8 +426,18 @@ void RakManager::enqueueCommand(uint32_t from, uint32_t to, uint8_t channel, con
     if (pendingCommands_.size() >= kMaxPendingCommands) {
         // Drop oldest to keep the system responsive.
         pendingCommands_.pop_front();
+        Logger::instance().println("[RAK][CMD] command queue full, dropping oldest");
     }
     pendingCommands_.push_back(std::move(cmd));
+
+    const auto& queued = pendingCommands_.back();
+    const std::size_t shown = std::min<std::size_t>(queued.text.size(), kMaxLoggedChars);
+    Logger::instance().printf("[RAK][CMD] command enqueued from=%u pending=%u text=\"%.*s%s\"\n",
+                              queued.from,
+                              static_cast<unsigned>(pendingCommands_.size()),
+                              static_cast<int>(shown),
+                              queued.text.c_str(),
+                              (queued.text.size() > shown) ? "..." : "");
 }
 
 void RakManager::processCommands() {
@@ -432,8 +454,19 @@ void RakManager::processCommands() {
 
     ParsedCommand parsed{};
     if (!tryParseBracketCommand(cmd.text, parsed)) {
+        Logger::instance().println("[RAK][CMD] parse failed (ignored)");
         return;
     }
+
+    Logger::instance().printf("[RAK][CMD] processing from=%u channel=%u cmd=%.*s arg0=%.*s arg1=%.*s\n",
+                              cmd.from,
+                              cmd.channel,
+                              static_cast<int>(parsed.name.size()),
+                              parsed.name.data(),
+                              static_cast<int>(parsed.arg0.size()),
+                              parsed.arg0.data(),
+                              static_cast<int>(parsed.arg1.size()),
+                              parsed.arg1.data());
 
     const bool isMaster = [&]() {
         Threads::Scope scope(mastersMutex_);
@@ -444,6 +477,7 @@ void RakManager::processCommands() {
     }();
 
     if (!isMaster) {
+        Logger::instance().printf("[RAK][CMD] unauthorized from=%u\n", cmd.from);
         transport_.enqueueText(cmd.from, cmd.channel, "[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
         return;
     }
@@ -452,6 +486,7 @@ void RakManager::processCommands() {
         if (line.empty()) {
             return;
         }
+        Logger::instance().printf("[RAK][CMD] reply to=%u len=%u\n", cmd.from, static_cast<unsigned>(line.size()));
         transport_.enqueueText(cmd.from, cmd.channel, std::string(line));
     };
 
