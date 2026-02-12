@@ -347,11 +347,14 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             Logger::instance().printf("[RAK][PAIR] request from=%u\n", from);
             if (!isEnrollmentSecretConfigured()) {
                 Logger::instance().println("[RAK] Enrollment disabled: set a strong MasterEnrollmentSecret in KeyboardConfig.");
+                instance.transport_.enqueueText(from, channel,
+                                                "[RAK] Enrollment disabled. Set MasterEnrollmentSecret in KeyboardConfig and reflash.");
                 return;
             }
 
             if (!constantTimeEquals(suppliedSecret, KeyboardConfig::Security::MasterEnrollmentSecret)) {
                 Logger::instance().printf("[RAK] Enrollment rejected for node %u: invalid credentials.\n", from);
+                instance.transport_.enqueueText(from, channel, "[RAK] Pair rejected: invalid secret.");
                 return;
             }
 
@@ -375,9 +378,11 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
 
             if (alreadyEnrolled) {
                 Logger::instance().printf("[RAK] Node %u is already enrolled as master.\n", from);
+                instance.transport_.enqueueText(from, channel, "[RAK] Already paired.");
             } else if (added) {
                 DatabaseManager::getInstance().saveData({std::to_string(from)}, KeyboardConfig::Tables::RadioMasters);
                 Logger::instance().printf("[RAK] Added new master node: %u\n", from);
+                instance.transport_.enqueueText(from, channel, "[RAK] Paired OK. Use [HELP].");
             }
             return;
         }
