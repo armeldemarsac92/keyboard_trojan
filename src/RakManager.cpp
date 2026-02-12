@@ -199,14 +199,22 @@ void logRoutingAppPacket(uint32_t from, uint32_t to, uint8_t channel, const mesh
 
     switch (routing.which_variant) {
         case meshtastic_Routing_route_request_tag: {
-            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=route_request pktId=%u reqId=%u pri=%s(%u) hops=%u\n",
+            Logger::instance().printf(
+                "[RAK][ROUTING] from=%u to=%u ch=%u type=route_request pktId=%u reqId=%u dataDest=%u dataSrc=%u "
+                "pri=%s(%u) hop=%u/%u snr=%.2f rssi=%d hops=%u\n",
                                       from,
                                       to,
                                       channel,
                                       pkt ? pkt->id : 0U,
                                       data ? data->request_id : 0U,
+                                      data ? data->dest : 0U,
+                                      data ? data->source : 0U,
                                       pkt ? priorityToString(pkt->priority) : "UNKNOWN",
                                       pkt ? static_cast<unsigned>(pkt->priority) : 0U,
+                                      pkt ? static_cast<unsigned>(pkt->hop_limit) : 0U,
+                                      pkt ? static_cast<unsigned>(pkt->hop_start) : 0U,
+                                      pkt ? pkt->rx_snr : 0.0f,
+                                      pkt ? static_cast<int>(pkt->rx_rssi) : 0,
                                       static_cast<unsigned>(routing.route_request.route_count));
 
             Logger::instance().print("[RAK][ROUTING] route=");
@@ -219,14 +227,22 @@ void logRoutingAppPacket(uint32_t from, uint32_t to, uint8_t channel, const mesh
         }
 
         case meshtastic_Routing_route_reply_tag: {
-            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=route_reply pktId=%u reqId=%u pri=%s(%u) hops=%u back_hops=%u\n",
+            Logger::instance().printf(
+                "[RAK][ROUTING] from=%u to=%u ch=%u type=route_reply pktId=%u reqId=%u dataDest=%u dataSrc=%u "
+                "pri=%s(%u) hop=%u/%u snr=%.2f rssi=%d hops=%u back_hops=%u\n",
                                       from,
                                       to,
                                       channel,
                                       pkt ? pkt->id : 0U,
                                       data ? data->request_id : 0U,
+                                      data ? data->dest : 0U,
+                                      data ? data->source : 0U,
                                       pkt ? priorityToString(pkt->priority) : "UNKNOWN",
                                       pkt ? static_cast<unsigned>(pkt->priority) : 0U,
+                                      pkt ? static_cast<unsigned>(pkt->hop_limit) : 0U,
+                                      pkt ? static_cast<unsigned>(pkt->hop_start) : 0U,
+                                      pkt ? pkt->rx_snr : 0.0f,
+                                      pkt ? static_cast<int>(pkt->rx_rssi) : 0,
                                       static_cast<unsigned>(routing.route_reply.route_count),
                                       static_cast<unsigned>(routing.route_reply.route_back_count));
 
@@ -251,17 +267,26 @@ void logRoutingAppPacket(uint32_t from, uint32_t to, uint8_t channel, const mesh
 
         case meshtastic_Routing_error_reason_tag: {
             const bool isAck = (routing.error_reason == meshtastic_Routing_Error_NONE);
-            Logger::instance().printf("[RAK][ROUTING] from=%u to=%u ch=%u type=%s pktId=%u reqId=%u pri=%s(%u) hop=%u/%u reason=%s(%d)\n",
+            Logger::instance().printf(
+                "[RAK][ROUTING] from=%u to=%u ch=%u type=%s pktId=%u reqId=%u dataDest=%u dataSrc=%u "
+                "replyId=%u bitfield=%u/%u pri=%s(%u) hop=%u/%u snr=%.2f rssi=%d reason=%s(%d)\n",
                                       from,
                                       to,
                                       channel,
                                       isAck ? "ack" : "error",
                                       pkt ? pkt->id : 0U,
                                       data ? data->request_id : 0U,
+                                      data ? data->dest : 0U,
+                                      data ? data->source : 0U,
+                                      data ? data->reply_id : 0U,
+                                      (data && data->has_bitfield) ? 1U : 0U,
+                                      data ? static_cast<unsigned>(data->bitfield) : 0U,
                                       pkt ? priorityToString(pkt->priority) : "UNKNOWN",
                                       pkt ? static_cast<unsigned>(pkt->priority) : 0U,
                                       pkt ? static_cast<unsigned>(pkt->hop_limit) : 0U,
                                       pkt ? static_cast<unsigned>(pkt->hop_start) : 0U,
+                                      pkt ? pkt->rx_snr : 0.0f,
+                                      pkt ? static_cast<int>(pkt->rx_rssi) : 0,
                                       routingErrorToString(routing.error_reason),
                                       static_cast<int>(routing.error_reason));
             return;
