@@ -12,7 +12,12 @@ namespace KeyboardConfig {
 
 class DatabaseManager {
 private:
-    std::vector<std::string> pendingStatements;
+    struct PendingInsert {
+        const DBTable* table = nullptr;
+        std::vector<std::string> values;
+    };
+
+    std::vector<PendingInsert> pendingInserts_;
     sqlite3* dbConnection = nullptr;
     Threads::Mutex queueMutex;
 
@@ -28,6 +33,6 @@ public:
     static DatabaseManager& getInstance();
     void cleanupDuplicates();
     [[nodiscard]] std::vector<KeyboardConfig::NodeInfo> getRadioNodes();
-    void saveData(const std::vector<std::string>& data, const DBTable& table);
+    void saveData(std::vector<std::string> data, const DBTable& table);
     void processQueue();
 };
