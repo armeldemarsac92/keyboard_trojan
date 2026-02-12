@@ -2,6 +2,9 @@
 
 Branch: `fix/top5-hardening`
 
+Status: legacy timestamp migration code was removed after completing the one-time migration (commit `3f8a8b3`).
+This document remains as historical context in case an older DB reappears.
+
 ## Symptom
 
 Device logs show SQLite `SQLITE_NOMEM (7)` during the legacy timestamp migration:
@@ -48,4 +51,3 @@ If you still see `[DB] Timestamp migration disabled (out of memory).`:
 - New rows are still stored in seconds.
 - Legacy rows may remain in microseconds.
 - If legacy data matters, consider migrating `logger.db` off-device (desktop SQLite) or deleting it so the firmware recreates a fresh DB with seconds-based timestamps.
-
