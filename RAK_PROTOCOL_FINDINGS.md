@@ -79,6 +79,24 @@ Observation: `FromRadio.queueStatus` and `FromRadio.clientNotification` exist in
 
 This matters because `QueueStatus.mesh_packet_id` could be a useful hook for low-level send/queue confirmation if we choose to integrate it.
 
+### ROUTING_APP semantics (ACK/NAK + request_id)
+
+Meshtastic uses `PortNum.ROUTING_APP` for route discovery and for reporting delivery status/errors. The payload is a `Routing` protobuf, but the important correlation ID is **not** inside the `Routing` message:
+
+- The `meshtastic_Data.request_id` field (part of the enclosing `MeshPacket.decoded`) references the **original** `MeshPacket.id` the ack/error is about.
+- The `Routing.error_reason` value indicates success/failure:
+  - `error_reason = NONE` commonly acts as an ACK ("delivered OK") for `request_id`
+  - non-NONE values indicate a failure (e.g. `TIMEOUT`, `NO_ROUTE`, `DUTY_CYCLE_LIMIT`, `NOT_AUTHORIZED`, `PKI_FAILED`, etc.)
+
+Implication for debugging:
+
+- If you only decode the `Routing` payload bytes, you will see `error_reason`, but you will miss `request_id`, which is what lets you map the status to a specific outbound message.
+- To correlate, you need both:
+  - log outbound `MeshPacket.id` at send time
+  - log inbound `ROUTING_APP` `request_id` + `error_reason`
+
+Note: newer protobufs add additional `Routing_Error` enum values (ex: `RATE_LIMIT_EXCEEDED=38`, `PKI_SEND_FAIL_PUBLIC_KEY=39`) that might not exist in older arduino-generated headers.
+
 ### Critical constraint: global protobuf buffer (thread-safety + reentrancy)
 
 In `mt_protocol.cpp`:
