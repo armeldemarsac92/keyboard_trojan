@@ -4,7 +4,10 @@
 #include <Arduino.h>
 #include <Meshtastic.h>
 #include <TeensyThreads.h>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <string>
 #include <vector>
 
 #include "RakTransport.h"
@@ -31,6 +34,18 @@ private:
     void loadSettingsFromDb();
     static void listenerThread(void* arg);
     static void onPrivatePayloadComplete(uint32_t from, uint8_t channel, const std::uint8_t* bytes, std::size_t len);
+    void processCommands();
+    void enqueueCommand(uint32_t from, uint32_t to, uint8_t channel, const char* text);
+
+    struct PendingCommand {
+        uint32_t from = 0;
+        uint32_t to = 0;
+        uint8_t channel = 0;
+        std::string text;
+    };
+
+    Threads::Mutex commandsMutex_;
+    std::deque<PendingCommand> pendingCommands_;
 
     // Helper for strings (can be static or instance)
     static const char* meshtastic_portnum_to_string(meshtastic_PortNum port);

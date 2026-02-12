@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -273,4 +275,95 @@ void DatabaseManager::processQueue() {
     }
 
     lastWriteTime = now;
+}
+
+bool DatabaseManager::countRows(const DBTable& table, std::uint32_t& outCount) {
+    outCount = 0;
+
+    if (!dbConnection || !dbAvailable_) {
+        return false;
+    }
+
+    Threads::Scope scope(dbMutex_);
+
+    const std::string sql = "SELECT COUNT(*) FROM " + table.tableName + ";";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(dbConnection, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        Logger::instance().printf("[DB] COUNT prepare failed (%s): %s\n", table.tableName.c_str(),
+                                  sqlite3_errmsg(dbConnection));
+        return false;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        const auto v = sqlite3_column_int64(stmt, 0);
+        if (v >= 0) {
+            outCount = static_cast<std::uint32_t>(v);
+        }
+    } else {
+        Logger::instance().printf("[DB] COUNT step failed (%s): rc=%d err=%s\n", table.tableName.c_str(), rc,
+                                  sqlite3_errmsg(dbConnection));
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
+    std::vector<std::string> lines;
+    if (!dbConnection || !dbAvailable_) {
+        return lines;
+    }
+
+    constexpr std::size_t kMaxLimit = 10;
+    constexpr int kMaxWordBytes = 48;
+    limit = std::min<std::size_t>(limit, kMaxLimit);
+    if (limit == 0) {
+        return lines;
+    }
+
+    Threads::Scope scope(dbMutex_);
+
+    sqlite3_stmt* stmt = nullptr;
+    const int rc = sqlite3_prepare_v2(dbConnection,
+                                      "SELECT InputID, Timestamp, Input FROM Inputs ORDER BY InputID DESC LIMIT ?1;",
+                                      -1,
+                                      &stmt,
+                                      nullptr);
+    if (rc != SQLITE_OK) {
+        Logger::instance().printf("[DB] TAIL prepare failed (Inputs): %s\n", sqlite3_errmsg(dbConnection));
+        return lines;
+    }
+
+    (void)sqlite3_bind_int(stmt, 1, static_cast<int>(limit));
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto id = sqlite3_column_int64(stmt, 0);
+        const double ts = sqlite3_column_double(stmt, 1);
+
+        const auto* txt = sqlite3_column_text(stmt, 2);
+        const int txtBytes = sqlite3_column_bytes(stmt, 2);
+        const int copyLen = std::min<int>(std::max<int>(txtBytes, 0), kMaxWordBytes);
+
+        char word[kMaxWordBytes + 4]{};  // + "..."
+        if (txt && copyLen > 0) {
+            std::memcpy(word, txt, static_cast<std::size_t>(copyLen));
+            word[copyLen] = '\0';
+        } else {
+            word[0] = '\0';
+        }
+
+        const bool truncated = txtBytes > kMaxWordBytes;
+
+        char buf[220]{};
+        std::snprintf(buf, sizeof(buf), "#%lld ts=%.3f input=\"%s%s\"", static_cast<long long>(id), ts, word,
+                      truncated ? "..." : "");
+        lines.emplace_back(buf);
+    }
+
+    sqlite3_finalize(stmt);
+    return lines;
 }

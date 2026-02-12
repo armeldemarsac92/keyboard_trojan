@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <TeensyThreads.h>
@@ -32,4 +33,8 @@ public:
     [[nodiscard]] std::vector<KeyboardConfig::NodeInfo> getRadioNodes();
     void saveData(std::vector<std::string> data, const DBTable& table);
     void processQueue();
+
+    // Read helpers for the RAK command protocol (bounded to keep the system responsive).
+    [[nodiscard]] bool countRows(const DBTable& table, std::uint32_t& outCount);
+    [[nodiscard]] std::vector<std::string> tailInputs(std::size_t limit);
 };

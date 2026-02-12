@@ -4,10 +4,13 @@
 #include "NlpManager.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <iterator>
 #include <string>
 #include <string_view>
 
@@ -61,7 +64,132 @@ bool tryExtractEnrollmentSecret(const char* message, std::string& outSecret) {
     outSecret.assign(messageView.substr(separatorPos + 1));
     return true;
 }
+
+constexpr char asciiLower(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return static_cast<char>(c - 'A' + 'a');
+    }
+    return c;
 }
+
+bool asciiIEquals(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (asciiLower(a[i]) != asciiLower(b[i])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool isAsciiWhitespace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+std::string_view trimLeft(std::string_view s) {
+    while (!s.empty() && isAsciiWhitespace(s.front())) {
+        s.remove_prefix(1);
+    }
+    return s;
+}
+
+std::string_view trim(std::string_view s) {
+    s = trimLeft(s);
+    while (!s.empty() && isAsciiWhitespace(s.back())) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+
+std::string_view nextToken(std::string_view& s) {
+    s = trimLeft(s);
+    if (s.empty()) {
+        return {};
+    }
+
+    std::size_t end = 0;
+    while (end < s.size() && !isAsciiWhitespace(s[end])) {
+        ++end;
+    }
+
+    const std::string_view tok = s.substr(0, end);
+    s.remove_prefix(end);
+    return tok;
+}
+
+struct ParsedCommand {
+    std::string_view name;
+    std::string_view arg0;
+    std::string_view arg1;
+};
+
+bool tryParseBracketCommand(std::string_view msg, ParsedCommand& out) {
+    msg = trim(msg);
+    if (msg.size() < 3 || msg.front() != '[') {
+        return false;
+    }
+
+    const std::size_t close = msg.find(']');
+    if (close == std::string_view::npos) {
+        return false;
+    }
+
+    std::string_view inside = msg.substr(1, close - 1);
+    std::string_view after = msg.substr(close + 1);
+
+    out = {};
+
+    out.name = nextToken(inside);
+    if (out.name.empty()) {
+        return false;
+    }
+
+    out.arg0 = nextToken(inside);
+    if (out.arg0.empty()) {
+        out.arg0 = nextToken(after);
+    }
+
+    out.arg1 = nextToken(inside);
+    if (out.arg1.empty()) {
+        out.arg1 = nextToken(after);
+    }
+
+    return true;
+}
+
+const DBTable* findKnownTable(std::string_view name) {
+    if (asciiIEquals(name, KeyboardConfig::Tables::Inputs.tableName)) {
+        return &KeyboardConfig::Tables::Inputs;
+    }
+
+    if (asciiIEquals(name, KeyboardConfig::Tables::RadioMasters.tableName)) {
+        return &KeyboardConfig::Tables::RadioMasters;
+    }
+
+    return nullptr;
+}
+
+std::size_t parseSizeOrDefault(std::string_view s, std::size_t fallback) {
+    s = trim(s);
+    if (s.empty()) {
+        return fallback;
+    }
+
+    // strtoul needs a null-terminated string; commands are small so this is fine.
+    std::string tmp(s);
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long v = std::strtoul(tmp.c_str(), &end, 10);
+    if (errno != 0 || end == nullptr || end == tmp.c_str() || *end != '\0') {
+        return fallback;
+    }
+    return static_cast<std::size_t>(v);
+}
+}  // namespace
 
 RakManager& RakManager::getInstance() {
     static RakManager instance;
@@ -250,11 +378,173 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             }
             return;
         }
+
+        // Command protocol (masters only). Queue the command and process it after mt_loop() returns.
+        ParsedCommand cmd{};
+        if (tryParseBracketCommand(text, cmd)) {
+            const bool known =
+                asciiIEquals(cmd.name, "HELP") || asciiIEquals(cmd.name, "QUERY") || asciiIEquals(cmd.name, "TABLES") ||
+                asciiIEquals(cmd.name, "SCHEMA") || asciiIEquals(cmd.name, "COUNT") || asciiIEquals(cmd.name, "TAIL");
+            if (known) {
+                instance.enqueueCommand(from, to, channel, text);
+                return;
+            }
+        }
     }
 
     if (std::strlen(text) > 1) {
         NlpManager::getInstance().analyzeSentence(text);
     }
+}
+
+void RakManager::enqueueCommand(uint32_t from, uint32_t to, uint8_t channel, const char* text) {
+    if (text == nullptr) {
+        return;
+    }
+
+    constexpr std::size_t kMaxPendingCommands = 8;
+
+    PendingCommand cmd;
+    cmd.from = from;
+    cmd.to = to;
+    cmd.channel = channel;
+    cmd.text = text;
+
+    Threads::Scope scope(commandsMutex_);
+    if (pendingCommands_.size() >= kMaxPendingCommands) {
+        // Drop oldest to keep the system responsive.
+        pendingCommands_.pop_front();
+    }
+    pendingCommands_.push_back(std::move(cmd));
+}
+
+void RakManager::processCommands() {
+    PendingCommand cmd;
+    {
+        Threads::Scope scope(commandsMutex_);
+        if (pendingCommands_.empty()) {
+            return;
+        }
+
+        cmd = std::move(pendingCommands_.front());
+        pendingCommands_.pop_front();
+    }
+
+    ParsedCommand parsed{};
+    if (!tryParseBracketCommand(cmd.text, parsed)) {
+        return;
+    }
+
+    const bool isMaster = [&]() {
+        Threads::Scope scope(mastersMutex_);
+        const std::uint64_t fromAddr = static_cast<std::uint64_t>(cmd.from);
+        return std::any_of(mastersAddresses.cbegin(), mastersAddresses.cend(), [&](const KeyboardConfig::NodeInfo& n) {
+            return n.address == fromAddr;
+        });
+    }();
+
+    if (!isMaster) {
+        transport_.enqueueText(cmd.from, cmd.channel, "[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
+        return;
+    }
+
+    auto send = [&](std::string_view line) {
+        if (line.empty()) {
+            return;
+        }
+        transport_.enqueueText(cmd.from, cmd.channel, std::string(line));
+    };
+
+    auto sendTables = [&]() {
+        send("[RAK] Available tables:");
+        send(" - Inputs");
+        send(" - RadioMasters");
+    };
+
+    if (asciiIEquals(parsed.name, "HELP") || asciiIEquals(parsed.name, "QUERY")) {
+        send("[RAK] ACK QUERY. What data do you want to query from the DB?");
+        sendTables();
+        send("[RAK] Commands: [SCHEMA <table>]  [COUNT <table>]  [TAIL Inputs <n>]");
+        return;
+    }
+
+    if (asciiIEquals(parsed.name, "TABLES")) {
+        sendTables();
+        return;
+    }
+
+    if (asciiIEquals(parsed.name, "SCHEMA")) {
+        const auto* table = findKnownTable(parsed.arg0);
+        if (table == nullptr) {
+            send("[RAK] Unknown table. Use [TABLES].");
+            return;
+        }
+
+        send(std::string("[RAK] Schema ") + table->tableName + ":");
+        for (const auto& col : table->columns) {
+            send(" - " + col.name + " " + col.type);
+        }
+        return;
+    }
+
+    if (asciiIEquals(parsed.name, "COUNT")) {
+        const auto* table = findKnownTable(parsed.arg0);
+        if (table == nullptr) {
+            send("[RAK] Unknown table. Use [TABLES].");
+            return;
+        }
+
+        std::uint32_t count = 0;
+        if (!DatabaseManager::getInstance().countRows(*table, count)) {
+            send("[RAK] COUNT failed.");
+            return;
+        }
+
+        char buf[80]{};
+        std::snprintf(buf, sizeof(buf), "[RAK] COUNT %s = %u", table->tableName.c_str(), static_cast<unsigned>(count));
+        send(buf);
+        return;
+    }
+
+    if (asciiIEquals(parsed.name, "TAIL")) {
+        const auto* table = findKnownTable(parsed.arg0);
+        if (table == nullptr) {
+            send("[RAK] Unknown table. Use [TABLES].");
+            return;
+        }
+
+        if (table == &KeyboardConfig::Tables::Inputs) {
+            const std::size_t n = parseSizeOrDefault(parsed.arg1, 5);
+            send("[RAK] TAIL Inputs (latest first):");
+            const auto lines = DatabaseManager::getInstance().tailInputs(n);
+            if (lines.empty()) {
+                send(" (no rows)");
+                return;
+            }
+            for (const auto& line : lines) {
+                send(line);
+            }
+            return;
+        }
+
+        if (table == &KeyboardConfig::Tables::RadioMasters) {
+            send("[RAK] RadioMasters:");
+            const auto nodes = DatabaseManager::getInstance().getRadioNodes();
+            if (nodes.empty()) {
+                send(" (no rows)");
+                return;
+            }
+            for (const auto& n : nodes) {
+                char buf[96]{};
+                std::snprintf(buf, sizeof(buf), " - id=%u addr=%llu", static_cast<unsigned>(n.id),
+                              static_cast<unsigned long long>(n.address));
+                send(buf);
+            }
+            return;
+        }
+    }
+
+    send("[RAK] Unknown command. Use [HELP].");
 }
 
 
@@ -298,6 +588,9 @@ void RakManager::listenerThread(void* arg) {
     while (true) {
         const std::uint32_t now = millis();
         mt_loop(now);
+
+        // Handle queued commands outside of mt_loop() callbacks.
+        instance.processCommands();
 
         if (now - lastActionTime >= kHeartbeatIntervalMs) {
             lastActionTime = now;
