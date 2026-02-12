@@ -406,22 +406,27 @@ void RakTransport::cleanupInboundTransfers(std::uint32_t nowMs) {
 
 void RakTransport::serviceOutbound(std::uint32_t nowMs) {
     // 1) High priority frames (ACKs).
-    OutboundFrame immediate;
-    {
-        Threads::Scope scope(mutex_);
-        if (!immediateFrames_.empty()) {
-            immediate = immediateFrames_.front();
-        }
-    }
-    if (!immediate.bytes.empty() || immediate.port != meshtastic_PortNum_UNKNOWN_APP) {
-        if (sendDecodedPacket(immediate.port, immediate.dest, immediate.channel, immediate.bytes.data(),
-                              immediate.bytes.size())) {
+    if (canSendNow()) {
+        OutboundFrame immediate;
+        bool haveImmediate = false;
+        {
             Threads::Scope scope(mutex_);
             if (!immediateFrames_.empty()) {
+                immediate = std::move(immediateFrames_.front());
                 immediateFrames_.pop_front();
+                haveImmediate = true;
             }
         }
-        return;  // at most one send per tick
+
+        if (haveImmediate) {
+            if (!sendDecodedPacket(immediate.port, immediate.dest, immediate.channel, immediate.bytes.data(),
+                                   immediate.bytes.size())) {
+                // Best-effort: if the send fails, requeue. The sender will retry after timeout anyway.
+                Threads::Scope scope(mutex_);
+                immediateFrames_.push_front(std::move(immediate));
+            }
+            return;  // at most one send per tick
+        }
     }
 
     // 2) Active reliable transfer (stop-and-wait per chunk).
