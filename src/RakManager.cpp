@@ -1068,11 +1068,16 @@ void RakManager::processCommands() {
         auto sendTableSelectedHeader = [&](const DBTable& table) {
             send(std::string("[RAK] QUERY: selected table ") + table.tableName + ".");
 
-            std::uint32_t count = 0;
-            if (DatabaseManager::getInstance().countRows(table, count)) {
-                char buf[96]{};
-                std::snprintf(buf, sizeof(buf), "[RAK] %s rows=%u", table.tableName.c_str(),
-                              static_cast<unsigned>(count));
+            std::uint64_t minRowid = 0;
+            std::uint64_t maxRowid = 0;
+            if (DatabaseManager::getInstance().rowidRange(table, minRowid, maxRowid) && maxRowid > 0) {
+                char buf[140]{};
+                std::snprintf(buf,
+                              sizeof(buf),
+                              "[RAK] %s rowid=%llu..%llu (use COUNT for exact rows)",
+                              table.tableName.c_str(),
+                              static_cast<unsigned long long>(minRowid),
+                              static_cast<unsigned long long>(maxRowid));
                 send(buf);
             }
 
@@ -1080,7 +1085,7 @@ void RakManager::processCommands() {
             if (DatabaseManager::getInstance().randomRow(table, line)) {
                 send(line);
             } else {
-                send("[RAK] (no rows)");
+                send("[RAK] RANDOM failed (db busy/low memory?)");
             }
 
             send("[RAK] Next: rowid | ROW <id> | RANDOM | COUNT | SCHEMA | TABLES | SECRETS | [/QUERY]");
@@ -1153,7 +1158,18 @@ void RakManager::processCommands() {
                 }
                 std::uint32_t count = 0;
                 if (!DatabaseManager::getInstance().countRows(*table, count)) {
-                    send("[RAK] COUNT failed.");
+                    std::uint64_t minRowid = 0;
+                    std::uint64_t maxRowid = 0;
+                    if (DatabaseManager::getInstance().rowidRange(*table, minRowid, maxRowid) && maxRowid > 0) {
+                        char buf[140]{};
+                        std::snprintf(buf,
+                                      sizeof(buf),
+                                      "[RAK] COUNT failed. Approx rows~%llu (rowid max).",
+                                      static_cast<unsigned long long>(maxRowid));
+                        send(buf);
+                    } else {
+                        send("[RAK] COUNT failed.");
+                    }
                     return;
                 }
                 char buf[80]{};
@@ -1173,7 +1189,13 @@ void RakManager::processCommands() {
                 if (DatabaseManager::getInstance().randomRow(*table, line)) {
                     send(line);
                 } else {
-                    send("[RAK] (no rows)");
+                    std::uint64_t minRowid = 0;
+                    std::uint64_t maxRowid = 0;
+                    if (DatabaseManager::getInstance().rowidRange(*table, minRowid, maxRowid) && maxRowid > 0) {
+                        send("[RAK] RANDOM failed. Try: ROW <id> or send a rowid number.");
+                    } else {
+                        send("[RAK] (no rows)");
+                    }
                 }
                 return;
             }
@@ -1271,7 +1293,18 @@ void RakManager::processCommands() {
 
             std::uint32_t count = 0;
             if (!DatabaseManager::getInstance().countRows(*table, count)) {
-                send("[RAK] COUNT failed.");
+                std::uint64_t minRowid = 0;
+                std::uint64_t maxRowid = 0;
+                if (DatabaseManager::getInstance().rowidRange(*table, minRowid, maxRowid) && maxRowid > 0) {
+                    char buf[140]{};
+                    std::snprintf(buf,
+                                  sizeof(buf),
+                                  "[RAK] COUNT failed. Approx rows~%llu (rowid max).",
+                                  static_cast<unsigned long long>(maxRowid));
+                    send(buf);
+                } else {
+                    send("[RAK] COUNT failed.");
+                }
                 return;
             }
 
@@ -1305,7 +1338,13 @@ void RakManager::processCommands() {
             if (DatabaseManager::getInstance().randomRow(*table, line)) {
                 send(line);
             } else {
-                send("[RAK] (no rows)");
+                std::uint64_t minRowid = 0;
+                std::uint64_t maxRowid = 0;
+                if (DatabaseManager::getInstance().rowidRange(*table, minRowid, maxRowid) && maxRowid > 0) {
+                    send("[RAK] RANDOM failed. Try: ROW <id> or send a rowid number.");
+                } else {
+                    send("[RAK] (no rows)");
+                }
             }
             return;
         }
