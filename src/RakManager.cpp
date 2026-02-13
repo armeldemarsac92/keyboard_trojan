@@ -1332,15 +1332,20 @@ void RakManager::processCommands() {
             return;
         }
 
-        // Table selection by number or name.
-        if (const auto* table = resolveQueryTableSelection(tok0); table != nullptr) {
-            querySession_->selectedTable = table;
-            sendTableSelectedHeader(*table);
+        if (querySession_->selectedTable == nullptr) {
+            // Table selection is only interpreted from numeric indices before a table is selected.
+            if (const auto* table = resolveQueryTableSelection(tok0); table != nullptr) {
+                querySession_->selectedTable = table;
+                sendTableSelectedHeader(*table);
+                return;
+            }
+
+            send("[RAK] QUERY: pick a table first (TABLES).");
             return;
         }
 
-        // Row selection by raw rowid (only after table selection).
-        if (querySession_->selectedTable != nullptr) {
+        // Row selection by raw rowid (after table selection).
+        {
             std::uint64_t rowid = 0;
             if (tryParseLeadingU64(tok0, rowid) && rowid != 0) {
                 std::string line;
@@ -1351,6 +1356,13 @@ void RakManager::processCommands() {
                 }
                 return;
             }
+        }
+
+        // Allow switching table by name without requiring TABLES/BACK.
+        if (const auto* table = findKnownTable(tok0); table != nullptr) {
+            querySession_->selectedTable = table;
+            sendTableSelectedHeader(*table);
+            return;
         }
 
         send("[RAK] QUERY: unrecognized. Send HELP or TABLES.");
