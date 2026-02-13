@@ -18,6 +18,25 @@
 #include "../config/KeyboardConfig.h"
 
 namespace {
+class TryLockGuard {
+public:
+    explicit TryLockGuard(Threads::Mutex& mutex) : mutex_(&mutex), locked_(mutex_->try_lock() != 0) {}
+    TryLockGuard(const TryLockGuard&) = delete;
+    TryLockGuard& operator=(const TryLockGuard&) = delete;
+    ~TryLockGuard() {
+        if (locked_ && mutex_ != nullptr) {
+            (void)mutex_->unlock();
+        }
+    }
+
+    [[nodiscard]] bool locked() const { return locked_; }
+    explicit operator bool() const { return locked_; }
+
+private:
+    Threads::Mutex* mutex_ = nullptr;
+    bool locked_ = false;
+};
+
 bool isTextColumnType(const std::string& columnType) {
     return columnType.find("TEXT") != std::string::npos;
 }
@@ -355,7 +374,11 @@ void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback
     }
 
     Logger::instance().printf("[DB][Q] SELECT * FROM %s\n", table.tableName.c_str());
-    Threads::Scope scope(dbMutex_);
+    TryLockGuard lock(dbMutex_);
+    if (!lock) {
+        Logger::instance().println("[DB][Q] SELECT: db busy");
+        return;
+    }
 
     const std::string query = "SELECT * FROM " + table.tableName + ";";
     sqlite3_stmt* stmt = nullptr;
@@ -363,6 +386,7 @@ void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback
     const int rc = sqlite3_prepare_v2(dbConnection, query.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         Logger::instance().printf("[DB] Read error: %s\n", sqlite3_errmsg(dbConnection));
+        (void)sqlite3_db_release_memory(dbConnection);
         return;
     }
 
@@ -373,6 +397,7 @@ void DatabaseManager::getData(const std::function<void(sqlite3_stmt*)>& callback
     }
 
     sqlite3_finalize(stmt);
+    (void)sqlite3_db_release_memory(dbConnection);
     Logger::instance().printf("[DB][Q] SELECT * FROM %s rows=%u\n", table.tableName.c_str(), static_cast<unsigned>(rows));
 }
 
@@ -489,7 +514,11 @@ bool DatabaseManager::countRows(const DBTable& table, std::uint32_t& outCount) {
     }
 
     Logger::instance().printf("[DB][Q] COUNT %s\n", table.tableName.c_str());
-    Threads::Scope scope(dbMutex_);
+    TryLockGuard lock(dbMutex_);
+    if (!lock) {
+        Logger::instance().println("[DB][Q] COUNT: db busy");
+        return false;
+    }
 
     const std::string sql = "SELECT COUNT(*) FROM " + table.tableName + ";";
     sqlite3_stmt* stmt = nullptr;
@@ -536,7 +565,11 @@ std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
     }
 
     Logger::instance().printf("[DB][Q] TAIL Inputs limit=%u\n", static_cast<unsigned>(limit));
-    Threads::Scope scope(dbMutex_);
+    TryLockGuard lock(dbMutex_);
+    if (!lock) {
+        Logger::instance().println("[DB][Q] TAIL: db busy");
+        return lines;
+    }
 
     sqlite3_stmt* stmt = nullptr;
     const int rc = sqlite3_prepare_v2(dbConnection,
@@ -589,7 +622,11 @@ bool DatabaseManager::randomRow(const DBTable& table, std::string& outLine) {
     }
 
     Logger::instance().printf("[DB][Q] RANDOM %s\n", table.tableName.c_str());
-    Threads::Scope scope(dbMutex_);
+    TryLockGuard lock(dbMutex_);
+    if (!lock) {
+        Logger::instance().println("[DB][Q] RANDOM: db busy");
+        return false;
+    }
 
     std::uint64_t minRowid = 0;
     std::uint64_t maxRowid = 0;
@@ -642,7 +679,11 @@ bool DatabaseManager::rowByRowid(const DBTable& table, std::uint64_t rowid, std:
 
     Logger::instance().printf("[DB][Q] ROWID %s id=%llu\n", table.tableName.c_str(),
                               static_cast<unsigned long long>(rowid));
-    Threads::Scope scope(dbMutex_);
+    TryLockGuard lock(dbMutex_);
+    if (!lock) {
+        Logger::instance().println("[DB][Q] ROWID: db busy");
+        return false;
+    }
 
     const bool ok = queryRowByRowidUnlocked(dbConnection, table.tableName, rowid, outLine);
     (void)sqlite3_db_release_memory(dbConnection);
@@ -657,7 +698,11 @@ bool DatabaseManager::rowidRange(const DBTable& table, std::uint64_t& outMinRowi
     }
 
     Logger::instance().printf("[DB][Q] ROWID RANGE %s\n", table.tableName.c_str());
-    Threads::Scope scope(dbMutex_);
+    TryLockGuard lock(dbMutex_);
+    if (!lock) {
+        Logger::instance().println("[DB][Q] ROWID RANGE: db busy");
+        return false;
+    }
 
     const bool ok = queryRowidRangeUnlocked(dbConnection, table.tableName, outMinRowid, outMaxRowid);
     (void)sqlite3_db_release_memory(dbConnection);
@@ -676,7 +721,11 @@ std::vector<std::string> DatabaseManager::topSecrets(std::size_t limit) {
         return lines;
     }
 
-    Threads::Scope scope(dbMutex_);
+    TryLockGuard lock(dbMutex_);
+    if (!lock) {
+        Logger::instance().println("[DB][Q] SECRETS: db busy");
+        return lines;
+    }
 
     // Keep the SECRETS query bounded: last N rows only.
     std::uint64_t minRowid = 0;
