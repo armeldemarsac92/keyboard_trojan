@@ -57,6 +57,7 @@ All commands are bracketed and case-insensitive:
   - End the session with `[/TYPE]` or after 5 minutes of inactivity.
   - While the session is active, `TEXT_MESSAGE_APP` DMs from the session owner are treated as typed text. Only `[TYPE]` and `[/TYPE]` are reserved; other bracketed commands like `[HELP]` will be typed, not executed.
   - Minimal escapes supported in typed text: `\\n` (Enter), `\\t` (Tab), `\\r`, `\\\\`.
+  - UTF-8: supports common French characters like `é`, `è`, `à`, `ç`, `ù` (and `’`/`‘` are normalized to `'`).
   - Layout: injection uses the firmware's **AZERTY** key mapping (`AzertyLayout`), so the host should be configured for AZERTY to get the intended characters.
 - `[/TYPE]` (end typing session)
   - Ends the active typing session and clears any queued injected text.
