@@ -28,12 +28,13 @@ public:
     static void encrypted_callback(uint32_t from, uint32_t to, uint8_t channel, meshtastic_MeshPacket_public_key_t pubKey, meshtastic_MeshPacket_encrypted_t *enc_payload);
     static void connected_callback(mt_node_t *node, mt_nr_progress_t progress);
     static void handleAiCompletion(String topic, float confidence);
-private:
-    RakManager();
-    std::vector<KeyboardConfig::NodeInfo> mastersAddresses;
-    Threads::Mutex mastersMutex_;
-    void loadSettingsFromDb();
-    static void listenerThread(void* arg);
+	private:
+	    RakManager();
+	    static void dbReplyCallback(std::uint32_t dest, std::uint8_t channel, std::string text);
+	    std::vector<KeyboardConfig::NodeInfo> mastersAddresses;
+	    Threads::Mutex mastersMutex_;
+	    void loadSettingsFromDb();
+	    static void listenerThread(void* arg);
     static void onPrivatePayloadComplete(uint32_t from, uint8_t channel, const std::uint8_t* bytes, std::size_t len);
     void processCommands();
     void pollTypingSessionTimeout(std::uint32_t now);

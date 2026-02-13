@@ -341,6 +341,7 @@ DatabaseManager::DatabaseManager() {
     dbAvailable_ = (dbConnection != nullptr);
 
     if (dbAvailable_) {
+        Logger::instance().printf("[DB] sqlite3_threadsafe=%d\n", sqlite3_threadsafe());
         configureEmbeddedPragmas(dbConnection);
 
         const bool inputsOk = createSQLTable(dbConnection, KeyboardConfig::Tables::Inputs);
@@ -353,6 +354,253 @@ DatabaseManager::DatabaseManager() {
 DatabaseManager& DatabaseManager::getInstance() {
     static DatabaseManager instance;
     return instance;
+}
+
+void DatabaseManager::setReplyCallback(ReplyCallback cb) {
+    Threads::Scope scope(jobsMutex_);
+    replyCb_ = cb;
+}
+
+void DatabaseManager::sendReply_(std::uint32_t dest, std::uint8_t channel, std::string text) {
+    if (text.empty()) {
+        return;
+    }
+
+    ReplyCallback cb = nullptr;
+    {
+        Threads::Scope scope(jobsMutex_);
+        cb = replyCb_;
+    }
+
+    if (cb == nullptr) {
+        return;
+    }
+
+    cb(dest, channel, std::move(text));
+}
+
+bool DatabaseManager::enqueueJob_(PendingJob job) {
+    constexpr std::size_t kMaxPendingJobs = 8;
+
+    Threads::Scope scope(jobsMutex_);
+    if (pendingJobs_.size() >= kMaxPendingJobs) {
+        Logger::instance().println("[DB][JOB] queue full (dropping)");
+        return false;
+    }
+
+    pendingJobs_.push_back(std::move(job));
+    Logger::instance().printf("[DB][JOB] enqueued kind=%u pending=%u\n",
+                              static_cast<unsigned>(pendingJobs_.back().kind),
+                              static_cast<unsigned>(pendingJobs_.size()));
+    return true;
+}
+
+bool DatabaseManager::enqueueQueryTableIntro(std::uint32_t replyTo, std::uint8_t channel, const DBTable& table) {
+    PendingJob job;
+    job.kind = JobKind::QueryTableIntro;
+    job.replyTo = replyTo;
+    job.channel = channel;
+    job.table = &table;
+    return enqueueJob_(job);
+}
+
+bool DatabaseManager::enqueueRandomRow(std::uint32_t replyTo, std::uint8_t channel, const DBTable& table) {
+    PendingJob job;
+    job.kind = JobKind::RandomRow;
+    job.replyTo = replyTo;
+    job.channel = channel;
+    job.table = &table;
+    return enqueueJob_(job);
+}
+
+bool DatabaseManager::enqueueCountRows(std::uint32_t replyTo, std::uint8_t channel, const DBTable& table) {
+    PendingJob job;
+    job.kind = JobKind::CountRows;
+    job.replyTo = replyTo;
+    job.channel = channel;
+    job.table = &table;
+    return enqueueJob_(job);
+}
+
+bool DatabaseManager::enqueueRowByRowid(std::uint32_t replyTo, std::uint8_t channel, const DBTable& table,
+                                       std::uint64_t rowid) {
+    PendingJob job;
+    job.kind = JobKind::RowByRowid;
+    job.replyTo = replyTo;
+    job.channel = channel;
+    job.table = &table;
+    job.rowid = rowid;
+    return enqueueJob_(job);
+}
+
+bool DatabaseManager::enqueueTopSecrets(std::uint32_t replyTo, std::uint8_t channel, std::size_t limit) {
+    PendingJob job;
+    job.kind = JobKind::TopSecrets;
+    job.replyTo = replyTo;
+    job.channel = channel;
+    job.limit = limit;
+    return enqueueJob_(job);
+}
+
+bool DatabaseManager::enqueueTailInputs(std::uint32_t replyTo, std::uint8_t channel, std::size_t limit) {
+    PendingJob job;
+    job.kind = JobKind::TailInputs;
+    job.replyTo = replyTo;
+    job.channel = channel;
+    job.limit = limit;
+    return enqueueJob_(job);
+}
+
+bool DatabaseManager::enqueueListRadioMasters(std::uint32_t replyTo, std::uint8_t channel) {
+    PendingJob job;
+    job.kind = JobKind::ListRadioMasters;
+    job.replyTo = replyTo;
+    job.channel = channel;
+    return enqueueJob_(job);
+}
+
+void DatabaseManager::processJobsOnce_() {
+    PendingJob job;
+    {
+        Threads::Scope scope(jobsMutex_);
+        if (pendingJobs_.empty()) {
+            return;
+        }
+        job = pendingJobs_.front();
+        pendingJobs_.pop_front();
+    }
+
+    if (!dbConnection || !dbAvailable_) {
+        sendReply_(job.replyTo, job.channel, "[RAK] DB unavailable.");
+        return;
+    }
+
+    switch (job.kind) {
+        case JobKind::QueryTableIntro: {
+            if (job.table == nullptr) {
+                sendReply_(job.replyTo, job.channel, "[RAK] QUERY: internal error (no table).");
+                return;
+            }
+
+            std::uint64_t minRowid = 0;
+            std::uint64_t maxRowid = 0;
+            if (rowidRange(*job.table, minRowid, maxRowid) && maxRowid > 0) {
+                char buf[140]{};
+                std::snprintf(buf,
+                              sizeof(buf),
+                              "[RAK] %s rowid=%llu..%llu (use COUNT for exact rows)",
+                              job.table->tableName.c_str(),
+                              static_cast<unsigned long long>(minRowid),
+                              static_cast<unsigned long long>(maxRowid));
+                sendReply_(job.replyTo, job.channel, buf);
+            }
+
+            std::string line;
+            if (randomRow(*job.table, line)) {
+                sendReply_(job.replyTo, job.channel, std::move(line));
+            } else {
+                sendReply_(job.replyTo, job.channel, "[RAK] (no rows)");
+            }
+
+            sendReply_(job.replyTo,
+                       job.channel,
+                       "[RAK] Next: rowid | ROW <id> | RANDOM | COUNT | SCHEMA | TABLES | SECRETS | [/QUERY]");
+            return;
+        }
+        case JobKind::RandomRow: {
+            if (job.table == nullptr) {
+                sendReply_(job.replyTo, job.channel, "[RAK] RANDOM: internal error (no table).");
+                return;
+            }
+
+            std::string line;
+            if (randomRow(*job.table, line)) {
+                sendReply_(job.replyTo, job.channel, std::move(line));
+            } else {
+                sendReply_(job.replyTo, job.channel, "[RAK] RANDOM failed.");
+            }
+            return;
+        }
+        case JobKind::CountRows: {
+            if (job.table == nullptr) {
+                sendReply_(job.replyTo, job.channel, "[RAK] COUNT: internal error (no table).");
+                return;
+            }
+
+            std::uint32_t count = 0;
+            if (countRows(*job.table, count)) {
+                char buf[80]{};
+                std::snprintf(buf, sizeof(buf), "[RAK] COUNT %s = %u", job.table->tableName.c_str(),
+                              static_cast<unsigned>(count));
+                sendReply_(job.replyTo, job.channel, buf);
+                return;
+            }
+
+            std::uint64_t minRowid = 0;
+            std::uint64_t maxRowid = 0;
+            if (rowidRange(*job.table, minRowid, maxRowid) && maxRowid > 0) {
+                char buf[140]{};
+                std::snprintf(buf,
+                              sizeof(buf),
+                              "[RAK] COUNT failed. Approx rows~%llu (rowid max).",
+                              static_cast<unsigned long long>(maxRowid));
+                sendReply_(job.replyTo, job.channel, buf);
+            } else {
+                sendReply_(job.replyTo, job.channel, "[RAK] COUNT failed.");
+            }
+            return;
+        }
+        case JobKind::RowByRowid: {
+            if (job.table == nullptr) {
+                sendReply_(job.replyTo, job.channel, "[RAK] ROW: internal error (no table).");
+                return;
+            }
+
+            std::string line;
+            if (rowByRowid(*job.table, job.rowid, line)) {
+                sendReply_(job.replyTo, job.channel, std::move(line));
+            } else {
+                sendReply_(job.replyTo, job.channel, "[RAK] ROW: not found.");
+            }
+            return;
+        }
+        case JobKind::TopSecrets: {
+            auto lines = topSecrets(job.limit);
+            if (lines.empty()) {
+                sendReply_(job.replyTo, job.channel, "[RAK] SECRETS: no data.");
+                return;
+            }
+            for (auto& line : lines) {
+                sendReply_(job.replyTo, job.channel, std::move(line));
+            }
+            return;
+        }
+        case JobKind::TailInputs: {
+            auto lines = tailInputs(job.limit);
+            if (lines.empty()) {
+                sendReply_(job.replyTo, job.channel, " (no rows)");
+                return;
+            }
+            for (auto& line : lines) {
+                sendReply_(job.replyTo, job.channel, std::move(line));
+            }
+            return;
+        }
+        case JobKind::ListRadioMasters: {
+            const auto nodes = getRadioNodes();
+            if (nodes.empty()) {
+                sendReply_(job.replyTo, job.channel, " (no rows)");
+                return;
+            }
+            for (const auto& n : nodes) {
+                char buf[96]{};
+                std::snprintf(buf, sizeof(buf), " - id=%u addr=%llu", static_cast<unsigned>(n.id),
+                              static_cast<unsigned long long>(n.address));
+                sendReply_(job.replyTo, job.channel, buf);
+            }
+            return;
+        }
+    }
 }
 
 std::vector<KeyboardConfig::NodeInfo> DatabaseManager::getRadioNodes() {
@@ -438,6 +686,9 @@ void DatabaseManager::saveData(std::vector<std::string> data, const DBTable& tab
 }
 
 void DatabaseManager::processQueue() {
+    // Always service interactive query jobs, even when there is nothing to flush.
+    processJobsOnce_();
+
     if (!dbConnection || !dbAvailable_) {
         return;
     }

@@ -543,6 +543,10 @@ RakManager::RakManager() {
     loadSettingsFromDb();
 }
 
+void RakManager::dbReplyCallback(std::uint32_t dest, std::uint8_t channel, std::string text) {
+    RakManager::getInstance().transport_.enqueueText(dest, channel, std::move(text));
+}
+
 void RakManager::loadSettingsFromDb() {
     const auto loaded = DatabaseManager::getInstance().getRadioNodes();
     {
@@ -1044,7 +1048,7 @@ void RakManager::processCommands() {
     };
 
     const bool inQuerySession = querySession_.has_value() && (querySession_->owner == cmd.from);
-    if (inQuerySession) {
+	        if (inQuerySession) {
         querySession_->lastActivityMs = millis();
         querySession_->channel = cmd.channel;
 
@@ -1065,31 +1069,12 @@ void RakManager::processCommands() {
             sendQueryTables();
         };
 
-        auto sendTableSelectedHeader = [&](const DBTable& table) {
-            send(std::string("[RAK] QUERY: selected table ") + table.tableName + ".");
-
-            std::uint64_t minRowid = 0;
-            std::uint64_t maxRowid = 0;
-            if (DatabaseManager::getInstance().rowidRange(table, minRowid, maxRowid) && maxRowid > 0) {
-                char buf[140]{};
-                std::snprintf(buf,
-                              sizeof(buf),
-                              "[RAK] %s rowid=%llu..%llu (use COUNT for exact rows)",
-                              table.tableName.c_str(),
-                              static_cast<unsigned long long>(minRowid),
-                              static_cast<unsigned long long>(maxRowid));
-                send(buf);
-            }
-
-            std::string line;
-            if (DatabaseManager::getInstance().randomRow(table, line)) {
-                send(line);
-            } else {
-                send("[RAK] RANDOM failed (db busy/low memory?)");
-            }
-
-            send("[RAK] Next: rowid | ROW <id> | RANDOM | COUNT | SCHEMA | TABLES | SECRETS | [/QUERY]");
-        };
+	        auto sendTableSelectedHeader = [&](const DBTable& table) {
+	            send(std::string("[RAK] QUERY: selected table ") + table.tableName + ". Fetching sample...");
+	            if (!DatabaseManager::getInstance().enqueueQueryTableIntro(cmd.from, cmd.channel, table)) {
+	                send("[RAK] DB busy (job queue full). Try again.");
+	            }
+	        };
 
         auto ensureSelectedTable = [&]() -> const DBTable* {
             if (querySession_->selectedTable != nullptr) {
@@ -1125,17 +1110,13 @@ void RakManager::processCommands() {
                 return;
             }
 
-            if (asciiIEquals(parsed.name, "SECRETS")) {
-                const auto lines = DatabaseManager::getInstance().topSecrets(5);
-                if (lines.empty()) {
-                    send("[RAK] SECRETS: no data.");
-                    return;
-                }
-                for (const auto& line : lines) {
-                    send(line);
-                }
-                return;
-            }
+	            if (asciiIEquals(parsed.name, "SECRETS")) {
+	                send("[RAK] SECRETS: computing...");
+	                if (!DatabaseManager::getInstance().enqueueTopSecrets(cmd.from, cmd.channel, 5)) {
+	                    send("[RAK] DB busy (job queue full). Try again.");
+	                }
+	                return;
+	            }
 
             if (asciiIEquals(parsed.name, "SCHEMA")) {
                 const auto* table = parsed.arg0.empty() ? ensureSelectedTable() : resolveQueryTableSelection(parsed.arg0);
@@ -1150,57 +1131,33 @@ void RakManager::processCommands() {
                 return;
             }
 
-            if (asciiIEquals(parsed.name, "COUNT")) {
-                const auto* table = parsed.arg0.empty() ? ensureSelectedTable() : resolveQueryTableSelection(parsed.arg0);
-                if (table == nullptr) {
-                    send("[RAK] COUNT: select a table first (TABLES).");
-                    return;
-                }
-                std::uint32_t count = 0;
-                if (!DatabaseManager::getInstance().countRows(*table, count)) {
-                    std::uint64_t minRowid = 0;
-                    std::uint64_t maxRowid = 0;
-                    if (DatabaseManager::getInstance().rowidRange(*table, minRowid, maxRowid) && maxRowid > 0) {
-                        char buf[140]{};
-                        std::snprintf(buf,
-                                      sizeof(buf),
-                                      "[RAK] COUNT failed. Approx rows~%llu (rowid max).",
-                                      static_cast<unsigned long long>(maxRowid));
-                        send(buf);
-                    } else {
-                        send("[RAK] COUNT failed.");
-                    }
-                    return;
-                }
-                char buf[80]{};
-                std::snprintf(buf, sizeof(buf), "[RAK] COUNT %s = %u", table->tableName.c_str(),
-                              static_cast<unsigned>(count));
-                send(buf);
-                return;
-            }
+	            if (asciiIEquals(parsed.name, "COUNT")) {
+	                const auto* table = parsed.arg0.empty() ? ensureSelectedTable() : resolveQueryTableSelection(parsed.arg0);
+	                if (table == nullptr) {
+	                    send("[RAK] COUNT: select a table first (TABLES).");
+	                    return;
+	                }
+	                send("[RAK] COUNT: working...");
+	                if (!DatabaseManager::getInstance().enqueueCountRows(cmd.from, cmd.channel, *table)) {
+	                    send("[RAK] DB busy (job queue full). Try again.");
+	                }
+	                return;
+	            }
 
-            if (asciiIEquals(parsed.name, "RANDOM")) {
-                const auto* table = parsed.arg0.empty() ? ensureSelectedTable() : resolveQueryTableSelection(parsed.arg0);
-                if (table == nullptr) {
-                    send("[RAK] RANDOM: select a table first (TABLES).");
-                    return;
-                }
-                std::string line;
-                if (DatabaseManager::getInstance().randomRow(*table, line)) {
-                    send(line);
-                } else {
-                    std::uint64_t minRowid = 0;
-                    std::uint64_t maxRowid = 0;
-                    if (DatabaseManager::getInstance().rowidRange(*table, minRowid, maxRowid) && maxRowid > 0) {
-                        send("[RAK] RANDOM failed. Try: ROW <id> or send a rowid number.");
-                    } else {
-                        send("[RAK] (no rows)");
-                    }
-                }
-                return;
-            }
+	            if (asciiIEquals(parsed.name, "RANDOM")) {
+	                const auto* table = parsed.arg0.empty() ? ensureSelectedTable() : resolveQueryTableSelection(parsed.arg0);
+	                if (table == nullptr) {
+	                    send("[RAK] RANDOM: select a table first (TABLES).");
+	                    return;
+	                }
+	                send("[RAK] RANDOM: working...");
+	                if (!DatabaseManager::getInstance().enqueueRandomRow(cmd.from, cmd.channel, *table)) {
+	                    send("[RAK] DB busy (job queue full). Try again.");
+	                }
+	                return;
+	            }
 
-            if (asciiIEquals(parsed.name, "ROW")) {
+	            if (asciiIEquals(parsed.name, "ROW")) {
                 const DBTable* table = ensureSelectedTable();
                 std::uint64_t rowid = 0;
 
@@ -1227,19 +1184,16 @@ void RakManager::processCommands() {
                     return;
                 }
 
-                if (rowid == 0) {
-                    send("[RAK] ROW: specify a rowid (ROW <id>).");
-                    return;
-                }
-
-                std::string line;
-                if (DatabaseManager::getInstance().rowByRowid(*table, rowid, line)) {
-                    send(line);
-                } else {
-                    send("[RAK] ROW: not found.");
-                }
-                return;
-            }
+	                if (rowid == 0) {
+	                    send("[RAK] ROW: specify a rowid (ROW <id>).");
+	                    return;
+	                }
+	                send("[RAK] ROW: working...");
+	                if (!DatabaseManager::getInstance().enqueueRowByRowid(cmd.from, cmd.channel, *table, rowid)) {
+	                    send("[RAK] DB busy (job queue full). Try again.");
+	                }
+	                return;
+	            }
 
             // Allow selecting table via [Inputs] etc.
             if (const auto* table = resolveQueryTableSelection(parsed.name); table != nullptr) {
@@ -1272,48 +1226,27 @@ void RakManager::processCommands() {
             return;
         }
 
-        if (asciiIEquals(tok0, "SECRETS")) {
-            const auto lines = DatabaseManager::getInstance().topSecrets(5);
-            if (lines.empty()) {
-                send("[RAK] SECRETS: no data.");
-                return;
-            }
-            for (const auto& line : lines) {
-                send(line);
-            }
-            return;
-        }
+	        if (asciiIEquals(tok0, "SECRETS")) {
+	            send("[RAK] SECRETS: computing...");
+	            if (!DatabaseManager::getInstance().enqueueTopSecrets(cmd.from, cmd.channel, 5)) {
+	                send("[RAK] DB busy (job queue full). Try again.");
+	            }
+	            return;
+	        }
 
-        if (asciiIEquals(tok0, "COUNT")) {
-            const auto* table = tok1.empty() ? ensureSelectedTable() : resolveQueryTableSelection(tok1);
-            if (table == nullptr) {
-                send("[RAK] COUNT: select a table first (TABLES).");
-                return;
-            }
+	        if (asciiIEquals(tok0, "COUNT")) {
+	            const auto* table = tok1.empty() ? ensureSelectedTable() : resolveQueryTableSelection(tok1);
+	            if (table == nullptr) {
+	                send("[RAK] COUNT: select a table first (TABLES).");
+	                return;
+	            }
 
-            std::uint32_t count = 0;
-            if (!DatabaseManager::getInstance().countRows(*table, count)) {
-                std::uint64_t minRowid = 0;
-                std::uint64_t maxRowid = 0;
-                if (DatabaseManager::getInstance().rowidRange(*table, minRowid, maxRowid) && maxRowid > 0) {
-                    char buf[140]{};
-                    std::snprintf(buf,
-                                  sizeof(buf),
-                                  "[RAK] COUNT failed. Approx rows~%llu (rowid max).",
-                                  static_cast<unsigned long long>(maxRowid));
-                    send(buf);
-                } else {
-                    send("[RAK] COUNT failed.");
-                }
-                return;
-            }
-
-            char buf[80]{};
-            std::snprintf(buf, sizeof(buf), "[RAK] COUNT %s = %u", table->tableName.c_str(),
-                          static_cast<unsigned>(count));
-            send(buf);
-            return;
-        }
+	            send("[RAK] COUNT: working...");
+	            if (!DatabaseManager::getInstance().enqueueCountRows(cmd.from, cmd.channel, *table)) {
+	                send("[RAK] DB busy (job queue full). Try again.");
+	            }
+	            return;
+	        }
 
         if (asciiIEquals(tok0, "SCHEMA")) {
             const auto* table = tok1.empty() ? ensureSelectedTable() : resolveQueryTableSelection(tok1);
@@ -1328,33 +1261,25 @@ void RakManager::processCommands() {
             return;
         }
 
-        if (asciiIEquals(tok0, "RANDOM")) {
-            const auto* table = tok1.empty() ? ensureSelectedTable() : resolveQueryTableSelection(tok1);
-            if (table == nullptr) {
-                send("[RAK] RANDOM: select a table first (TABLES).");
-                return;
-            }
-            std::string line;
-            if (DatabaseManager::getInstance().randomRow(*table, line)) {
-                send(line);
-            } else {
-                std::uint64_t minRowid = 0;
-                std::uint64_t maxRowid = 0;
-                if (DatabaseManager::getInstance().rowidRange(*table, minRowid, maxRowid) && maxRowid > 0) {
-                    send("[RAK] RANDOM failed. Try: ROW <id> or send a rowid number.");
-                } else {
-                    send("[RAK] (no rows)");
-                }
-            }
-            return;
-        }
+	        if (asciiIEquals(tok0, "RANDOM")) {
+	            const auto* table = tok1.empty() ? ensureSelectedTable() : resolveQueryTableSelection(tok1);
+	            if (table == nullptr) {
+	                send("[RAK] RANDOM: select a table first (TABLES).");
+	                return;
+	            }
+	            send("[RAK] RANDOM: working...");
+	            if (!DatabaseManager::getInstance().enqueueRandomRow(cmd.from, cmd.channel, *table)) {
+	                send("[RAK] DB busy (job queue full). Try again.");
+	            }
+	            return;
+	        }
 
-        if (asciiIEquals(tok0, "ROW")) {
-            const auto* table = ensureSelectedTable();
-            if (table == nullptr) {
-                send("[RAK] ROW: select a table first (TABLES).");
-                return;
-            }
+	        if (asciiIEquals(tok0, "ROW")) {
+	            const auto* table = ensureSelectedTable();
+	            if (table == nullptr) {
+	                send("[RAK] ROW: select a table first (TABLES).");
+	                return;
+	            }
 
             std::uint64_t rowid = 0;
             if (!tryParseLeadingU64(tok1, rowid) || rowid == 0) {
@@ -1362,14 +1287,12 @@ void RakManager::processCommands() {
                 return;
             }
 
-            std::string line;
-            if (DatabaseManager::getInstance().rowByRowid(*table, rowid, line)) {
-                send(line);
-            } else {
-                send("[RAK] ROW: not found.");
-            }
-            return;
-        }
+	            send("[RAK] ROW: working...");
+	            if (!DatabaseManager::getInstance().enqueueRowByRowid(cmd.from, cmd.channel, *table, rowid)) {
+	                send("[RAK] DB busy (job queue full). Try again.");
+	            }
+	            return;
+	        }
 
         if (querySession_->selectedTable == nullptr) {
             // Table selection is only interpreted from numeric indices before a table is selected.
@@ -1384,18 +1307,16 @@ void RakManager::processCommands() {
         }
 
         // Row selection by raw rowid (after table selection).
-        {
-            std::uint64_t rowid = 0;
-            if (tryParseLeadingU64(tok0, rowid) && rowid != 0) {
-                std::string line;
-                if (DatabaseManager::getInstance().rowByRowid(*querySession_->selectedTable, rowid, line)) {
-                    send(line);
-                } else {
-                    send("[RAK] ROW: not found.");
-                }
-                return;
-            }
-        }
+	        {
+	            std::uint64_t rowid = 0;
+	            if (tryParseLeadingU64(tok0, rowid) && rowid != 0) {
+	                send("[RAK] ROW: working...");
+	                if (!DatabaseManager::getInstance().enqueueRowByRowid(cmd.from, cmd.channel, *querySession_->selectedTable, rowid)) {
+	                    send("[RAK] DB busy (job queue full). Try again.");
+	                }
+	                return;
+	            }
+	        }
 
         // Allow switching table by name without requiring TABLES/BACK.
         if (const auto* table = findKnownTable(tok0); table != nullptr) {
@@ -1467,16 +1388,10 @@ void RakManager::processCommands() {
             send("[RAK] Unknown table. Use [TABLES].");
             return;
         }
-
-        std::uint32_t count = 0;
-        if (!DatabaseManager::getInstance().countRows(*table, count)) {
-            send("[RAK] COUNT failed.");
-            return;
+        send("[RAK] COUNT: working...");
+        if (!DatabaseManager::getInstance().enqueueCountRows(cmd.from, cmd.channel, *table)) {
+            send("[RAK] DB busy (job queue full). Try again.");
         }
-
-        char buf[80]{};
-        std::snprintf(buf, sizeof(buf), "[RAK] COUNT %s = %u", table->tableName.c_str(), static_cast<unsigned>(count));
-        send(buf);
         return;
     }
 
@@ -1490,29 +1405,16 @@ void RakManager::processCommands() {
         if (table == &KeyboardConfig::Tables::Inputs) {
             const std::size_t n = parseSizeOrDefault(parsed.arg1, 5);
             send("[RAK] TAIL Inputs (latest first):");
-            const auto lines = DatabaseManager::getInstance().tailInputs(n);
-            if (lines.empty()) {
-                send(" (no rows)");
-                return;
-            }
-            for (const auto& line : lines) {
-                send(line);
+            if (!DatabaseManager::getInstance().enqueueTailInputs(cmd.from, cmd.channel, n)) {
+                send("[RAK] DB busy (job queue full). Try again.");
             }
             return;
         }
 
         if (table == &KeyboardConfig::Tables::RadioMasters) {
             send("[RAK] RadioMasters:");
-            const auto nodes = DatabaseManager::getInstance().getRadioNodes();
-            if (nodes.empty()) {
-                send(" (no rows)");
-                return;
-            }
-            for (const auto& n : nodes) {
-                char buf[96]{};
-                std::snprintf(buf, sizeof(buf), " - id=%u addr=%llu", static_cast<unsigned>(n.id),
-                              static_cast<unsigned long long>(n.address));
-                send(buf);
+            if (!DatabaseManager::getInstance().enqueueListRadioMasters(cmd.from, cmd.channel)) {
+                send("[RAK] DB busy (job queue full). Try again.");
             }
             return;
         }
@@ -1575,6 +1477,7 @@ void RakManager::begin() {
 
     NlpManager::getInstance().setCallback(RakManager::handleAiCompletion);
     transport_.setPayloadCompleteCallback(onPrivatePayloadComplete);
+    DatabaseManager::getInstance().setReplyCallback(RakManager::dbReplyCallback);
 
     Logger::instance().println("[RAK] Manager Init with Callback System...");
     threads.addThread(listenerThread, nullptr, 4096);
