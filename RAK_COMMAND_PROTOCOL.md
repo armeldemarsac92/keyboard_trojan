@@ -51,9 +51,13 @@ All commands are bracketed and case-insensitive:
   - Returns up to 10 latest rows from `Inputs` (`InputID`, `Timestamp`, `Input`), with input truncated.
 - `[TAIL RadioMasters]`
   - Lists enrolled masters (id/address).
-- `[TYPE <phrase>]` or `[TYPE] <phrase>`
-  - Injects the phrase into the connected host as USB keyboard input (master-only).
-  - Supports minimal escapes: `\\n` (Enter), `\\t` (Tab), `\\r`, `\\\\`.
+- `[TYPE]` (start typing session)
+  - Opens a typing session (master-only). Any subsequent direct messages from that master are injected into the host as USB keyboard input.
+  - End the session with `[/TYPE]` or after 5 minutes of inactivity.
+  - Minimal escapes supported in typed text: `\\n` (Enter), `\\t` (Tab), `\\r`, `\\\\`.
+  - Layout: injection uses the firmware's **AZERTY** key mapping (`AzertyLayout`), so the host should be configured for AZERTY to get the intended characters.
+- `[/TYPE]` (end typing session)
+  - Ends the active typing session and clears any queued injected text.
 
 ## Files
 

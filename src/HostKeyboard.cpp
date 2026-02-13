@@ -118,25 +118,42 @@ bool HostKeyboard::enqueueTypeText(std::string_view text) {
     }
 
     Threads::Scope lock(mutex_);
-    if (active_) {
+    if (!active_) {
+        startJobLocked_(text);
+        return true;
+    }
+
+    if (queueCount_ >= kQueueSize) {
         return false;
     }
 
-    len_ = std::min<std::size_t>(text.size(), kMaxTypeChars);
-    for (std::size_t i = 0; i < len_; ++i) {
-        text_[i] = text[i];
+    auto& slot = queue_[queueTail_];
+    slot.len = std::min<std::size_t>(text.size(), kMaxTypeChars);
+    for (std::size_t i = 0; i < slot.len; ++i) {
+        slot.text[i] = text[i];
     }
-    text_[len_] = '\0';
-    index_ = 0;
-    typed_ = 0;
-    skipped_ = 0;
-    active_ = true;
+    slot.text[slot.len] = '\0';
+
+    queueTail_ = (queueTail_ + 1) % kQueueSize;
+    ++queueCount_;
     return true;
 }
 
 bool HostKeyboard::isBusy() const {
     Threads::Scope lock(mutex_);
-    return active_;
+    return active_ || (queueCount_ > 0);
+}
+
+void HostKeyboard::cancelAll() {
+    Threads::Scope lock(mutex_);
+    active_ = false;
+    len_ = 0;
+    index_ = 0;
+    typed_ = 0;
+    skipped_ = 0;
+    queueHead_ = 0;
+    queueTail_ = 0;
+    queueCount_ = 0;
 }
 
 void HostKeyboard::tick() {
@@ -147,6 +164,14 @@ void HostKeyboard::typeNextChunk_(std::size_t maxChars) {
     static const auto kReverse = buildAzertyReverseMap();
 
     Threads::Scope lock(mutex_);
+    if (!active_ && queueCount_ > 0) {
+        const auto& slot = queue_[queueHead_];
+        startJobLocked_(std::string_view(slot.text.data(), slot.len));
+
+        queueHead_ = (queueHead_ + 1) % kQueueSize;
+        --queueCount_;
+    }
+
     if (!active_) {
         return;
     }
@@ -159,12 +184,26 @@ void HostKeyboard::typeNextChunk_(std::size_t maxChars) {
     }
 
     if (index_ >= len_) {
-        Logger::instance().printf("[HOSTKBD] typeText typed=%u skipped=%u len=%u\n",
+        Logger::instance().printf("[HOSTKBD] typeText layout=AZERTY typed=%u skipped=%u len=%u\n",
                                   static_cast<unsigned>(typed_),
                                   static_cast<unsigned>(skipped_),
                                   static_cast<unsigned>(len_));
         active_ = false;
         len_ = 0;
         index_ = 0;
+        typed_ = 0;
+        skipped_ = 0;
     }
+}
+
+void HostKeyboard::startJobLocked_(std::string_view text) {
+    len_ = std::min<std::size_t>(text.size(), kMaxTypeChars);
+    for (std::size_t i = 0; i < len_; ++i) {
+        text_[i] = text[i];
+    }
+    text_[len_] = '\0';
+    index_ = 0;
+    typed_ = 0;
+    skipped_ = 0;
+    active_ = true;
 }

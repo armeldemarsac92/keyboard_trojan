@@ -675,13 +675,116 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             return;
         }
 
-        // Command protocol (masters only). Queue the command and process it after mt_loop() returns.
+        const bool typingSessionActive = instance.typingSession_.has_value();
+        const bool isTypingOwner = typingSessionActive && (instance.typingSession_->owner == from);
+
+        auto reply = [&](std::string_view line) {
+            if (line.empty()) {
+                return;
+            }
+            instance.transport_.enqueueText(from, channel, std::string(line));
+        };
+
+        auto isMaster = [&]() {
+            Threads::Scope scope(instance.mastersMutex_);
+            const std::uint64_t fromAddr = static_cast<std::uint64_t>(from);
+            return std::any_of(instance.mastersAddresses.cbegin(), instance.mastersAddresses.cend(),
+                               [&](const KeyboardConfig::NodeInfo& n) { return n.address == fromAddr; });
+        };
+
+        // In TYPE session mode, any DM text from the session owner is injected into the host keyboard,
+        // except the reserved closing command [/TYPE]. We handle [TYPE]/[/TYPE] immediately so the
+        // session state is updated before any subsequent messages processed by the same mt_loop() call.
         ParsedCommand cmd{};
         if (tryParseBracketCommand(text, cmd)) {
+            if (asciiIEquals(cmd.name, "TYPE")) {
+                if (!isMaster()) {
+                    reply("[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
+                    return;
+                }
+
+                const std::uint32_t nowMs = millis();
+                if (instance.typingSession_.has_value() && instance.typingSession_->owner != from) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] TYPE: busy (session owned by %u).", 
+                                  static_cast<unsigned>(instance.typingSession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                if (!instance.typingSession_.has_value()) {
+                    instance.typingSession_ = TypingSession{
+                        .owner = from,
+                        .channel = channel,
+                        .lastActivityMs = nowMs,
+                    };
+                    reply("[RAK] TYPE: session started. Send [/TYPE] to end (timeout 300s).");
+                    reply("[RAK] Escapes: \\\\n \\\\t \\\\r \\\\\\\\");
+                } else {
+                    instance.typingSession_->channel = channel;
+                    instance.typingSession_->lastActivityMs = nowMs;
+                    reply("[RAK] TYPE: session already active. Send [/TYPE] to end.");
+                }
+
+                std::string_view payload;
+                if (tryExtractCommandPayload(text, "TYPE", payload)) {
+                    payload = trim(payload);
+                    if (!payload.empty()) {
+                        const std::string phrase = unescapeRadioText(payload);
+                        if (!HostKeyboard::instance().enqueueTypeText(phrase)) {
+                            reply("[RAK] TYPE: queue full (slow down).");
+                        }
+                        instance.typingSession_->lastActivityMs = nowMs;
+                        Logger::instance().printf("[RAK][TYPE] session cmd payload from=%u len=%u\n", from,
+                                                  static_cast<unsigned>(phrase.size()));
+                    }
+                }
+
+                return;
+            }
+
+            if (asciiIEquals(cmd.name, "/TYPE")) {
+                if (!isMaster()) {
+                    reply("[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
+                    return;
+                }
+
+                if (!instance.typingSession_.has_value()) {
+                    reply("[RAK] TYPE: no active session.");
+                    return;
+                }
+
+                if (instance.typingSession_->owner != from) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] TYPE: session owned by %u.",
+                                  static_cast<unsigned>(instance.typingSession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                instance.typingSession_.reset();
+                HostKeyboard::instance().cancelAll();
+                reply("[RAK] TYPE: session ended.");
+                Logger::instance().printf("[RAK][TYPE] session ended by owner=%u\n", from);
+                return;
+            }
+
+            if (isTypingOwner) {
+                instance.typingSession_->lastActivityMs = millis();
+                instance.typingSession_->channel = channel;
+
+                const std::string phrase = unescapeRadioText(text);
+                if (!HostKeyboard::instance().enqueueTypeText(phrase)) {
+                    instance.transport_.enqueueText(from, channel, "[RAK] TYPE: queue full (slow down).");
+                }
+                Logger::instance().printf("[RAK][TYPE] session text from=%u len=%u\n", from,
+                                          static_cast<unsigned>(phrase.size()));
+                return;
+            }
+
             const bool known =
                 asciiIEquals(cmd.name, "HELP") || asciiIEquals(cmd.name, "QUERY") || asciiIEquals(cmd.name, "TABLES") ||
-                asciiIEquals(cmd.name, "SCHEMA") || asciiIEquals(cmd.name, "COUNT") || asciiIEquals(cmd.name, "TAIL") ||
-                asciiIEquals(cmd.name, "TYPE");
+                asciiIEquals(cmd.name, "SCHEMA") || asciiIEquals(cmd.name, "COUNT") || asciiIEquals(cmd.name, "TAIL");
             if (known) {
                 Logger::instance().printf("[RAK][CMD] queued from=%u cmd=%.*s arg0=%.*s arg1=%.*s\n",
                                           from,
@@ -694,6 +797,17 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
                 instance.enqueueCommand(from, to, channel, text);
                 return;
             }
+        } else if (isTypingOwner) {
+            instance.typingSession_->lastActivityMs = millis();
+            instance.typingSession_->channel = channel;
+
+            const std::string phrase = unescapeRadioText(text);
+            if (!HostKeyboard::instance().enqueueTypeText(phrase)) {
+                instance.transport_.enqueueText(from, channel, "[RAK] TYPE: queue full (slow down).");
+            }
+            Logger::instance().printf("[RAK][TYPE] session text from=%u len=%u\n", from,
+                                      static_cast<unsigned>(phrase.size()));
+            return;
         }
     }
 
@@ -794,6 +908,7 @@ void RakManager::processCommands() {
         send("[RAK] ACK QUERY. What data do you want to query from the DB?");
         sendTables();
         send("[RAK] Commands: [SCHEMA <table>]  [COUNT <table>]  [TAIL Inputs <n>]");
+        send("[RAK] Keyboard: [TYPE] to start typing session, [/TYPE] to end (or 5 min idle).");
         return;
     }
 
@@ -873,62 +988,25 @@ void RakManager::processCommands() {
         }
     }
 
-    if (asciiIEquals(parsed.name, "TYPE")) {
-        std::string_view payload;
-        if (!tryExtractCommandPayload(cmd.text, "TYPE", payload)) {
-            send("[RAK] Usage: [TYPE <phrase>] or [TYPE] <phrase>");
-            send("[RAK] Escapes: \\\\n \\\\t \\\\r \\\\\\\\");
-            return;
-        }
-
-        constexpr std::size_t kMaxTypeChars = 220;  // keep well under TEXT_MESSAGE_APP payload constraints
-        payload = trim(payload);
-        if (payload.empty()) {
-            send("[RAK] TYPE: empty phrase.");
-            return;
-        }
-
-        std::string phrase = unescapeRadioText(payload);
-        if (phrase.size() > kMaxTypeChars) {
-            phrase.resize(kMaxTypeChars);
-        }
-
-        Logger::instance().printf("[RAK][TYPE] from=%u len=%u\n", cmd.from, static_cast<unsigned>(phrase.size()));
-        if (pendingTypeCompletion_.has_value() || HostKeyboard::instance().isBusy()) {
-            send("[RAK] TYPE: busy (already typing).");
-            return;
-        }
-
-        if (!HostKeyboard::instance().enqueueTypeText(phrase)) {
-            send("[RAK] TYPE: busy (enqueue failed).");
-            return;
-        }
-
-        pendingTypeCompletion_ = PendingTypeCompletion{
-            .dest = cmd.from,
-            .channel = cmd.channel,
-            .startedMs = millis(),
-        };
-
-        send("[RAK] TYPE: queued.");
-        return;
-    }
-
     send("[RAK] Unknown command. Use [HELP].");
 }
 
-void RakManager::pollTypeCompletion(std::uint32_t now) {
-    if (!pendingTypeCompletion_.has_value()) {
+void RakManager::pollTypingSessionTimeout(std::uint32_t now) {
+    if (!typingSession_.has_value()) {
         return;
     }
 
-    (void)now;
-    if (HostKeyboard::instance().isBusy()) {
+    constexpr std::uint32_t kTimeoutMs = 5U * 60U * 1000U;
+    if (now - typingSession_->lastActivityMs < kTimeoutMs) {
         return;
     }
 
-    transport_.enqueueText(pendingTypeCompletion_->dest, pendingTypeCompletion_->channel, "[RAK] TYPE: done.");
-    pendingTypeCompletion_.reset();
+    const auto owner = typingSession_->owner;
+    const auto channel = typingSession_->channel;
+
+    typingSession_.reset();
+    HostKeyboard::instance().cancelAll();
+    transport_.enqueueText(owner, channel, "[RAK] TYPE: session ended (timeout).");
 }
 
 
@@ -981,7 +1059,7 @@ void RakManager::listenerThread(void* arg) {
 
         // Handle queued commands outside of mt_loop() callbacks.
         instance.processCommands();
-        instance.pollTypeCompletion(now);
+        instance.pollTypingSessionTimeout(now);
 
         if (now - lastActionTime >= kHeartbeatIntervalMs) {
             lastActionTime = now;
