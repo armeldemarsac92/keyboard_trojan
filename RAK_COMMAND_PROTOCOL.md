@@ -53,7 +53,9 @@ All commands are bracketed and case-insensitive:
   - Lists enrolled masters (id/address).
 - `[TYPE]` (start typing session)
   - Opens a typing session (master-only). Any subsequent direct messages from that master are injected into the host as USB keyboard input.
+  - Only one typing session can be active at a time (owned by the master who started it).
   - End the session with `[/TYPE]` or after 5 minutes of inactivity.
+  - While the session is active, `TEXT_MESSAGE_APP` DMs from the session owner are treated as typed text. Only `[TYPE]` and `[/TYPE]` are reserved; other bracketed commands like `[HELP]` will be typed, not executed.
   - Minimal escapes supported in typed text: `\\n` (Enter), `\\t` (Tab), `\\r`, `\\\\`.
   - Layout: injection uses the firmware's **AZERTY** key mapping (`AzertyLayout`), so the host should be configured for AZERTY to get the intended characters.
 - `[/TYPE]` (end typing session)
