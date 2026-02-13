@@ -1,16 +1,14 @@
 #include "HostKeyboard.h"
 
-#include <TeensyThreads.h>
+#include <algorithm>
 #include <array>
 #include <cstdint>
-#include <utility>
 
 #include <keylayouts.h>
 #include <usb_keyboard.h>
 
 #include "AzertyLayout.h"
 #include "Logger.h"
-#include "UsbKeyboardMutex.h"
 
 namespace {
 constexpr std::uint16_t kRawKeycodePrefix = 0xF000;
@@ -72,6 +70,41 @@ void typeRawKey(std::uint8_t keycode, std::uint8_t mods) {
         Keyboard.release(MODIFIERKEY_LEFT_SHIFT);
     }
 }
+
+bool typeChar(char c, const std::array<KeyCombo, 256>& reverseMap, std::size_t& typed, std::size_t& skipped) {
+    switch (c) {
+        case '\n':
+        case '\r':
+            typeRawKey(40, 0);  // Enter
+            ++typed;
+            return true;
+        case '\t':
+            typeRawKey(43, 0);  // Tab
+            ++typed;
+            return true;
+        case ' ':
+            typeRawKey(44, 0);  // Space
+            ++typed;
+            return true;
+        case '\b':
+            typeRawKey(42, 0);  // Backspace
+            ++typed;
+            return true;
+        default:
+            break;
+    }
+
+    const auto idx = static_cast<unsigned char>(c);
+    const auto combo = reverseMap[idx];
+    if (!combo.valid) {
+        ++skipped;
+        return false;
+    }
+
+    typeRawKey(combo.keycode, combo.mods);
+    ++typed;
+    return true;
+}
 }  // namespace
 
 HostKeyboard& HostKeyboard::instance() {
@@ -79,57 +112,59 @@ HostKeyboard& HostKeyboard::instance() {
     return inst;
 }
 
-void HostKeyboard::typeText(std::string_view text) {
+bool HostKeyboard::enqueueTypeText(std::string_view text) {
     if (text.empty()) {
+        return false;
+    }
+
+    Threads::Scope lock(mutex_);
+    if (active_) {
+        return false;
+    }
+
+    len_ = std::min<std::size_t>(text.size(), kMaxTypeChars);
+    for (std::size_t i = 0; i < len_; ++i) {
+        text_[i] = text[i];
+    }
+    text_[len_] = '\0';
+    index_ = 0;
+    typed_ = 0;
+    skipped_ = 0;
+    active_ = true;
+    return true;
+}
+
+bool HostKeyboard::isBusy() const {
+    Threads::Scope lock(mutex_);
+    return active_;
+}
+
+void HostKeyboard::tick() {
+    typeNextChunk_(kCharsPerTick);
+}
+
+void HostKeyboard::typeNextChunk_(std::size_t maxChars) {
+    static const auto kReverse = buildAzertyReverseMap();
+
+    Threads::Scope lock(mutex_);
+    if (!active_) {
         return;
     }
 
-    static const auto kReverse = buildAzertyReverseMap();
-
-    Threads::Scope lock(usbKeyboardMutex());
-
-    std::size_t typed = 0;
-    std::size_t skipped = 0;
-
-    for (const char c : text) {
-        switch (c) {
-            case '\n':
-            case '\r':
-                typeRawKey(40, 0);  // Enter
-                ++typed;
-                continue;
-            case '\t':
-                typeRawKey(43, 0);  // Tab
-                ++typed;
-                continue;
-            case ' ':
-                typeRawKey(44, 0);  // Space
-                ++typed;
-                continue;
-            case '\b':
-                typeRawKey(42, 0);  // Backspace
-                ++typed;
-                continue;
-            default:
-                break;
-        }
-
-        const auto idx = static_cast<unsigned char>(c);
-        const auto combo = kReverse[idx];
-        if (!combo.valid) {
-            ++skipped;
-            continue;
-        }
-
-        typeRawKey(combo.keycode, combo.mods);
-        ++typed;
+    const std::size_t remaining = (index_ < len_) ? (len_ - index_) : 0;
+    const std::size_t todo = std::min<std::size_t>(remaining, maxChars);
+    for (std::size_t i = 0; i < todo; ++i) {
+        const char c = text_[index_++];
+        (void)typeChar(c, kReverse, typed_, skipped_);
     }
 
-    Keyboard.releaseAll();
-
-    Logger::instance().printf("[HOSTKBD] typeText typed=%u skipped=%u len=%u\n",
-                              static_cast<unsigned>(typed),
-                              static_cast<unsigned>(skipped),
-                              static_cast<unsigned>(text.size()));
+    if (index_ >= len_) {
+        Logger::instance().printf("[HOSTKBD] typeText typed=%u skipped=%u len=%u\n",
+                                  static_cast<unsigned>(typed_),
+                                  static_cast<unsigned>(skipped_),
+                                  static_cast<unsigned>(len_));
+        active_ = false;
+        len_ = 0;
+        index_ = 0;
+    }
 }
-

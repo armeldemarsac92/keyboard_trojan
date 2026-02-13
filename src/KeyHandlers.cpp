@@ -7,7 +7,6 @@
 #include "KeyHandlers.h"
 #include "Globals.h"
 #include "Queuing.h"
-#include "UsbKeyboardMutex.h"
 
 namespace {
 constexpr std::uint16_t kRawKeycodePrefix = 0xF000;
@@ -48,15 +47,12 @@ void OnRawPress(KeyboardController &kbd, uint8_t keycode) {
   const std::uint16_t modKey = mapModifier(keycode);
   const bool isModifier = (modKey != 0);
 
-  {
-    Threads::Scope lock(usbKeyboardMutex());
-    if (isModifier) {
-      // If it is a modifier (like Super), press the Modifier Constant
-      Keyboard.press(modKey);
-    } else {
-      // If standard key, press using Raw Keycode
-      Keyboard.press(kRawKeycodePrefix | keycode);
-    }
+  if (isModifier) {
+    // If it is a modifier (like Super), press the Modifier Constant
+    Keyboard.press(modKey);
+  } else {
+    // If standard key, press using Raw Keycode
+    Keyboard.press(kRawKeycodePrefix | keycode);
   }
 
   // PrintKeyPress(keycode, isModifier);
@@ -72,13 +68,10 @@ void OnRawRelease(KeyboardController &kbd, uint8_t keycode) {
   (void)kbd;
   const std::uint16_t modKey = mapModifier(keycode);
 
-  {
-    Threads::Scope lock(usbKeyboardMutex());
-    if (modKey != 0) {
-      Keyboard.release(modKey);
-    } else {
-      Keyboard.release(kRawKeycodePrefix | keycode);
-    }
+  if (modKey != 0) {
+    Keyboard.release(modKey);
+  } else {
+    Keyboard.release(kRawKeycodePrefix | keycode);
   }
 
   // PrintKeyRelease(keycode);
@@ -91,7 +84,6 @@ void OnHIDExtrasPress2(uint32_t top, uint16_t key) { OnHIDExtrasPress(keyboard2,
 void OnHIDExtrasPress(KeyboardController &kbd, uint32_t top, uint16_t key) {
   (void)kbd;
   if (top == kConsumerControlUsagePage) { // Page 0x0C is Consumer Control
-    Threads::Scope lock(usbKeyboardMutex());
     Keyboard.press(kMediaKeyPrefix | key);
   }
 }
@@ -102,7 +94,6 @@ void OnHIDExtrasRelease2(uint32_t top, uint16_t key) { OnHIDExtrasRelease(keyboa
 void OnHIDExtrasRelease(KeyboardController &kbd, uint32_t top, uint16_t key) {
   (void)kbd;
   if (top == kConsumerControlUsagePage) {
-    Threads::Scope lock(usbKeyboardMutex());
     Keyboard.release(kMediaKeyPrefix | key);
   }
 }

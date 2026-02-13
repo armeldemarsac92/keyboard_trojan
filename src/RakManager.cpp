@@ -894,15 +894,41 @@ void RakManager::processCommands() {
         }
 
         Logger::instance().printf("[RAK][TYPE] from=%u len=%u\n", cmd.from, static_cast<unsigned>(phrase.size()));
-        send("[RAK] TYPE: injecting phrase...");
+        if (pendingTypeCompletion_.has_value() || HostKeyboard::instance().isBusy()) {
+            send("[RAK] TYPE: busy (already typing).");
+            return;
+        }
 
-        HostKeyboard::instance().typeText(phrase);
+        if (!HostKeyboard::instance().enqueueTypeText(phrase)) {
+            send("[RAK] TYPE: busy (enqueue failed).");
+            return;
+        }
 
-        send("[RAK] TYPE: done.");
+        pendingTypeCompletion_ = PendingTypeCompletion{
+            .dest = cmd.from,
+            .channel = cmd.channel,
+            .startedMs = millis(),
+        };
+
+        send("[RAK] TYPE: queued.");
         return;
     }
 
     send("[RAK] Unknown command. Use [HELP].");
+}
+
+void RakManager::pollTypeCompletion(std::uint32_t now) {
+    if (!pendingTypeCompletion_.has_value()) {
+        return;
+    }
+
+    (void)now;
+    if (HostKeyboard::instance().isBusy()) {
+        return;
+    }
+
+    transport_.enqueueText(pendingTypeCompletion_->dest, pendingTypeCompletion_->channel, "[RAK] TYPE: done.");
+    pendingTypeCompletion_.reset();
 }
 
 
@@ -955,6 +981,7 @@ void RakManager::listenerThread(void* arg) {
 
         // Handle queued commands outside of mt_loop() callbacks.
         instance.processCommands();
+        instance.pollTypeCompletion(now);
 
         if (now - lastActionTime >= kHeartbeatIntervalMs) {
             lastActionTime = now;

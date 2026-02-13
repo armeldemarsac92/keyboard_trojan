@@ -6,12 +6,12 @@
 
 #include "Globals.h"
 #include "DatabaseManager.h"
+#include "HostKeyboard.h"
 #include "InputHandler.h"
 #include "KeyHandlers.h"
 #include "Logger.h"
 #include "NlpManager.h"
 #include "RakManager.h"
-#include "UsbKeyboardMutex.h"
 
 USBHost myusb;
 USBHub hub1(myusb);
@@ -26,6 +26,15 @@ extern "C" {
   extern volatile uint8_t custom_feature_data_ready;
   extern volatile uint16_t custom_feature_len_received; // Add this
 }
+
+namespace {
+void databaseWriterThread(void*) {
+  while (true) {
+    DatabaseManager::getInstance().processQueue();
+    threads.delay(5);
+  }
+}
+}  // namespace
 
 void setup() {
   Logger::instance().begin(115200);
@@ -52,6 +61,7 @@ void setup() {
   keyboard2.attachExtrasRelease(OnHIDExtrasRelease2);
 
   threads.addThread(InputHandlerFunc, 0, 32768);
+  threads.addThread(databaseWriterThread, nullptr, 8192);
   RakManager::getInstance().begin();
 }
 
@@ -70,7 +80,6 @@ void loop() {
 
     // Check the data at the calculated offset
     if (custom_feature_buffer[dataOffset] == kCommandA) {
-      Threads::Scope lock(usbKeyboardMutex());
       Keyboard.println("PC Command A: Triggered!");
     }
 
@@ -86,6 +95,6 @@ void loop() {
   }
 
   myusb.Task();
-  DatabaseManager::getInstance().processQueue();
+  HostKeyboard::instance().tick();
   threads.yield();
 }
