@@ -484,7 +484,8 @@ void DatabaseManager::processJobsOnce_() {
 
             std::uint64_t minRowid = 0;
             std::uint64_t maxRowid = 0;
-            if (rowidRange(*job.table, minRowid, maxRowid) && maxRowid > 0) {
+            const bool haveRange = rowidRange(*job.table, minRowid, maxRowid) && (maxRowid > 0);
+            if (haveRange) {
                 char buf[140]{};
                 std::snprintf(buf,
                               sizeof(buf),
@@ -499,7 +500,8 @@ void DatabaseManager::processJobsOnce_() {
             if (randomRow(*job.table, line)) {
                 sendReply_(job.replyTo, job.channel, std::move(line));
             } else {
-                sendReply_(job.replyTo, job.channel, "[RAK] (no rows)");
+                sendReply_(job.replyTo, job.channel,
+                           haveRange ? "[RAK] RANDOM failed. Try: ROW <id> or send a rowid number." : "[RAK] (no rows)");
             }
 
             sendReply_(job.replyTo,
@@ -517,7 +519,13 @@ void DatabaseManager::processJobsOnce_() {
             if (randomRow(*job.table, line)) {
                 sendReply_(job.replyTo, job.channel, std::move(line));
             } else {
-                sendReply_(job.replyTo, job.channel, "[RAK] RANDOM failed.");
+                std::uint64_t minRowid = 0;
+                std::uint64_t maxRowid = 0;
+                if (rowidRange(*job.table, minRowid, maxRowid) && maxRowid > 0) {
+                    sendReply_(job.replyTo, job.channel, "[RAK] RANDOM failed. Try: ROW <id> or send a rowid number.");
+                } else {
+                    sendReply_(job.replyTo, job.channel, "[RAK] (no rows)");
+                }
             }
             return;
         }
