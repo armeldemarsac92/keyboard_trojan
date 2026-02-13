@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 #include <TeensyThreads.h>
@@ -37,4 +38,11 @@ public:
     // Read helpers for the RAK command protocol (bounded to keep the system responsive).
     [[nodiscard]] bool countRows(const DBTable& table, std::uint32_t& outCount);
     [[nodiscard]] std::vector<std::string> tailInputs(std::size_t limit);
+
+    // Generic helpers for interactive query sessions.
+    [[nodiscard]] bool randomRow(const DBTable& table, std::string& outLine);
+    [[nodiscard]] bool rowByRowid(const DBTable& table, std::uint64_t rowid, std::string& outLine);
+
+    // "Secrets": words that appear often and have high entropy + variance (p90 thresholds).
+    [[nodiscard]] std::vector<std::string> topSecrets(std::size_t limit);
 };
