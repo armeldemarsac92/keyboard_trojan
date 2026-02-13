@@ -204,6 +204,92 @@ std::string formatRowAsKeyValue(sqlite3_stmt* stmt) {
 
     return out;
 }
+
+bool queryRowidRangeUnlocked(sqlite3* db, const std::string& tableName, std::uint64_t& outMin, std::uint64_t& outMax) {
+    outMin = 0;
+    outMax = 0;
+    if (db == nullptr) {
+        return false;
+    }
+
+    const std::string sql = "SELECT MIN(rowid), MAX(rowid) FROM " + tableName + ";";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        return false;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        if (sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
+            const auto v = sqlite3_column_int64(stmt, 0);
+            if (v > 0) {
+                outMin = static_cast<std::uint64_t>(v);
+            }
+        }
+        if (sqlite3_column_type(stmt, 1) != SQLITE_NULL) {
+            const auto v = sqlite3_column_int64(stmt, 1);
+            if (v > 0) {
+                outMax = static_cast<std::uint64_t>(v);
+            }
+        }
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    sqlite3_finalize(stmt);
+    return false;
+}
+
+bool queryRowByRowidUnlocked(sqlite3* db, const std::string& tableName, std::uint64_t rowid, std::string& outLine) {
+    outLine.clear();
+    if (db == nullptr) {
+        return false;
+    }
+
+    const std::string sql = "SELECT rowid, * FROM " + tableName + " WHERE rowid = ?1 LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        return false;
+    }
+
+    (void)sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(rowid));
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        outLine = formatRowAsKeyValue(stmt);
+        sqlite3_finalize(stmt);
+        return !outLine.empty();
+    }
+
+    sqlite3_finalize(stmt);
+    return false;
+}
+
+bool queryLastRowUnlocked(sqlite3* db, const std::string& tableName, std::string& outLine) {
+    outLine.clear();
+    if (db == nullptr) {
+        return false;
+    }
+
+    const std::string sql = "SELECT rowid, * FROM " + tableName + " ORDER BY rowid DESC LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        return false;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        outLine = formatRowAsKeyValue(stmt);
+        sqlite3_finalize(stmt);
+        return !outLine.empty();
+    }
+
+    sqlite3_finalize(stmt);
+    return false;
+}
 }  // namespace
 
 DatabaseManager::DatabaseManager() {
@@ -473,24 +559,47 @@ bool DatabaseManager::randomRow(const DBTable& table, std::string& outLine) {
     Logger::instance().printf("[DB][Q] RANDOM %s\n", table.tableName.c_str());
     Threads::Scope scope(dbMutex_);
 
-    const std::string sql = "SELECT rowid, * FROM " + table.tableName + " ORDER BY RANDOM() LIMIT 1;";
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(dbConnection, sql.c_str(), -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        Logger::instance().printf("[DB] RANDOM prepare failed (%s): %s\n", table.tableName.c_str(),
-                                  sqlite3_errmsg(dbConnection));
+    std::uint64_t minRowid = 0;
+    std::uint64_t maxRowid = 0;
+    if (!queryRowidRangeUnlocked(dbConnection, table.tableName, minRowid, maxRowid) || maxRowid == 0 ||
+        maxRowid < minRowid) {
+        (void)sqlite3_db_release_memory(dbConnection);
         return false;
     }
 
-    rc = sqlite3_step(stmt);
-    if (rc == SQLITE_ROW) {
-        outLine = formatRowAsKeyValue(stmt);
-        sqlite3_finalize(stmt);
-        return !outLine.empty();
+    const std::uint64_t span = (maxRowid - minRowid) + 1;
+    if (span == 0) {
+        (void)sqlite3_db_release_memory(dbConnection);
+        return false;
     }
 
-    sqlite3_finalize(stmt);
-    return false;
+    auto boundedRand = [](std::uint64_t boundExclusive) -> std::uint64_t {
+        if (boundExclusive == 0) {
+            return 0;
+        }
+
+        auto rnd31 = []() -> std::uint64_t {
+            // random(max) returns [0, max), with max limited to signed long range.
+            return static_cast<std::uint64_t>(static_cast<std::uint32_t>(random(0x7fffffff)));
+        };
+
+        const std::uint64_t r = (rnd31() << 31) | rnd31();
+        return r % boundExclusive;
+    };
+
+    constexpr std::size_t kTries = 8;
+    for (std::size_t i = 0; i < kTries; ++i) {
+        const std::uint64_t guess = minRowid + boundedRand(span);
+        if (queryRowByRowidUnlocked(dbConnection, table.tableName, guess, outLine)) {
+            (void)sqlite3_db_release_memory(dbConnection);
+            return true;
+        }
+    }
+
+    // Fall back to a deterministic query if the table has holes in rowids.
+    const bool ok = queryLastRowUnlocked(dbConnection, table.tableName, outLine);
+    (void)sqlite3_db_release_memory(dbConnection);
+    return ok;
 }
 
 bool DatabaseManager::rowByRowid(const DBTable& table, std::uint64_t rowid, std::string& outLine) {
@@ -503,26 +612,24 @@ bool DatabaseManager::rowByRowid(const DBTable& table, std::uint64_t rowid, std:
                               static_cast<unsigned long long>(rowid));
     Threads::Scope scope(dbMutex_);
 
-    const std::string sql = "SELECT rowid, * FROM " + table.tableName + " WHERE rowid = ?1 LIMIT 1;";
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(dbConnection, sql.c_str(), -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        Logger::instance().printf("[DB] ROWID prepare failed (%s): %s\n", table.tableName.c_str(),
-                                  sqlite3_errmsg(dbConnection));
+    const bool ok = queryRowByRowidUnlocked(dbConnection, table.tableName, rowid, outLine);
+    (void)sqlite3_db_release_memory(dbConnection);
+    return ok;
+}
+
+bool DatabaseManager::rowidRange(const DBTable& table, std::uint64_t& outMinRowid, std::uint64_t& outMaxRowid) {
+    outMinRowid = 0;
+    outMaxRowid = 0;
+    if (!dbConnection || !dbAvailable_) {
         return false;
     }
 
-    (void)sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(rowid));
+    Logger::instance().printf("[DB][Q] ROWID RANGE %s\n", table.tableName.c_str());
+    Threads::Scope scope(dbMutex_);
 
-    rc = sqlite3_step(stmt);
-    if (rc == SQLITE_ROW) {
-        outLine = formatRowAsKeyValue(stmt);
-        sqlite3_finalize(stmt);
-        return !outLine.empty();
-    }
-
-    sqlite3_finalize(stmt);
-    return false;
+    const bool ok = queryRowidRangeUnlocked(dbConnection, table.tableName, outMinRowid, outMaxRowid);
+    (void)sqlite3_db_release_memory(dbConnection);
+    return ok;
 }
 
 std::vector<std::string> DatabaseManager::topSecrets(std::size_t limit) {
@@ -539,13 +646,29 @@ std::vector<std::string> DatabaseManager::topSecrets(std::size_t limit) {
 
     Threads::Scope scope(dbMutex_);
 
-    // 1) Count rows.
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(dbConnection, "SELECT COUNT(*) FROM Inputs;", -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        Logger::instance().printf("[DB] SECRETS count prepare failed: %s\n", sqlite3_errmsg(dbConnection));
+    // Keep the SECRETS query bounded: last N rows only.
+    std::uint64_t minRowid = 0;
+    std::uint64_t maxRowid = 0;
+    if (!queryRowidRangeUnlocked(dbConnection, KeyboardConfig::Tables::Inputs.tableName, minRowid, maxRowid) ||
+        maxRowid == 0) {
+        (void)sqlite3_db_release_memory(dbConnection);
         return lines;
     }
+
+    constexpr std::uint64_t kWindowRows = 2000;
+    const std::uint64_t rawWindowMin = (maxRowid > kWindowRows) ? (maxRowid - kWindowRows) : minRowid;
+    const std::uint64_t windowMinRowid = std::max(minRowid, rawWindowMin);
+
+    // 1) Count rows in the window.
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(dbConnection, "SELECT COUNT(*) FROM Inputs WHERE rowid >= ?1;", -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        Logger::instance().printf("[DB] SECRETS count prepare failed: %s\n", sqlite3_errmsg(dbConnection));
+        (void)sqlite3_db_release_memory(dbConnection);
+        return lines;
+    }
+
+    (void)sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(windowMinRowid));
 
     std::uint32_t count = 0;
     rc = sqlite3_step(stmt);
@@ -562,24 +685,30 @@ std::vector<std::string> DatabaseManager::topSecrets(std::size_t limit) {
     sqlite3_finalize(stmt);
 
     if (count == 0) {
+        (void)sqlite3_db_release_memory(dbConnection);
         return lines;
     }
 
-    // 2) Compute p90 thresholds for Entropy and Variance (best-effort).
+    // 2) Compute p90 thresholds for Entropy and Variance (best-effort, within the window).
     const int offset = static_cast<int>(((static_cast<std::uint64_t>(count) * 90U) / 100U));
     const int p90Index = std::max(0, offset - 1);
 
     auto selectP90 = [&](const char* col, double& outP90) -> bool {
         outP90 = 0.0;
-        char sql[96]{};
-        std::snprintf(sql, sizeof(sql), "SELECT %s FROM Inputs ORDER BY %s LIMIT 1 OFFSET ?1;", col, col);
+        char sql[128]{};
+        std::snprintf(sql,
+                      sizeof(sql),
+                      "SELECT %s FROM Inputs WHERE rowid >= ?1 ORDER BY %s LIMIT 1 OFFSET ?2;",
+                      col,
+                      col);
         sqlite3_stmt* s = nullptr;
         int r = sqlite3_prepare_v2(dbConnection, sql, -1, &s, nullptr);
         if (r != SQLITE_OK) {
             Logger::instance().printf("[DB] SECRETS p90 prepare failed (%s): %s\n", col, sqlite3_errmsg(dbConnection));
             return false;
         }
-        (void)sqlite3_bind_int(s, 1, p90Index);
+        (void)sqlite3_bind_int64(s, 1, static_cast<sqlite3_int64>(windowMinRowid));
+        (void)sqlite3_bind_int(s, 2, p90Index);
         r = sqlite3_step(s);
         if (r == SQLITE_ROW) {
             outP90 = sqlite3_column_double(s, 0);
@@ -595,32 +724,40 @@ std::vector<std::string> DatabaseManager::topSecrets(std::size_t limit) {
     (void)selectP90("Entropy", entropyP90);
     (void)selectP90("Variance", varianceP90);
 
-    char hdr[120]{};
-    std::snprintf(hdr, sizeof(hdr), "[RAK] SECRETS p90 entropy>=%.3f variance>=%.3f (rows=%u)",
-                  entropyP90, varianceP90, static_cast<unsigned>(count));
+    char hdr[150]{};
+    std::snprintf(hdr,
+                  sizeof(hdr),
+                  "[RAK] SECRETS (last %llu rows) p90 entropy>=%.3f variance>=%.3f (rows=%u)",
+                  static_cast<unsigned long long>(kWindowRows),
+                  entropyP90,
+                  varianceP90,
+                  static_cast<unsigned>(count));
     lines.emplace_back(hdr);
 
-    // 3) Group by Input and keep those above thresholds.
+    // 3) Group by Input and keep those above thresholds (within the window).
     rc = sqlite3_prepare_v2(
         dbConnection,
         "SELECT Input, COUNT(*) AS c, AVG(Entropy) AS e, AVG(Variance) AS v "
         "FROM Inputs "
+        "WHERE rowid >= ?1 "
         "GROUP BY Input "
-        "HAVING c >= ?1 AND e >= ?2 AND v >= ?3 "
-        "ORDER BY c DESC LIMIT ?4;",
+        "HAVING c >= ?2 AND e >= ?3 AND v >= ?4 "
+        "ORDER BY c DESC LIMIT ?5;",
         -1,
         &stmt,
         nullptr);
     if (rc != SQLITE_OK) {
         Logger::instance().printf("[DB] SECRETS prepare failed: %s\n", sqlite3_errmsg(dbConnection));
+        (void)sqlite3_db_release_memory(dbConnection);
         return lines;
     }
 
     constexpr int kMinCount = 3;
-    (void)sqlite3_bind_int(stmt, 1, kMinCount);
-    (void)sqlite3_bind_double(stmt, 2, entropyP90);
-    (void)sqlite3_bind_double(stmt, 3, varianceP90);
-    (void)sqlite3_bind_int(stmt, 4, static_cast<int>(limit));
+    (void)sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(windowMinRowid));
+    (void)sqlite3_bind_int(stmt, 2, kMinCount);
+    (void)sqlite3_bind_double(stmt, 3, entropyP90);
+    (void)sqlite3_bind_double(stmt, 4, varianceP90);
+    (void)sqlite3_bind_int(stmt, 5, static_cast<int>(limit));
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const auto* txt = sqlite3_column_text(stmt, 0);
@@ -645,5 +782,6 @@ std::vector<std::string> DatabaseManager::topSecrets(std::size_t limit) {
     }
 
     sqlite3_finalize(stmt);
+    (void)sqlite3_db_release_memory(dbConnection);
     return lines;
 }

@@ -42,6 +42,7 @@ public:
     // Generic helpers for interactive query sessions.
     [[nodiscard]] bool randomRow(const DBTable& table, std::string& outLine);
     [[nodiscard]] bool rowByRowid(const DBTable& table, std::uint64_t rowid, std::string& outLine);
+    [[nodiscard]] bool rowidRange(const DBTable& table, std::uint64_t& outMinRowid, std::uint64_t& outMaxRowid);
 
     // "Secrets": words that appear often and have high entropy + variance (p90 thresholds).
     [[nodiscard]] std::vector<std::string> topSecrets(std::size_t limit);
