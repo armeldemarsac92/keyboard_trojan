@@ -51,6 +51,9 @@ All commands are bracketed and case-insensitive:
   - Returns up to 10 latest rows from `Inputs` (`InputID`, `Timestamp`, `Input`), with input truncated.
 - `[TAIL RadioMasters]`
   - Lists enrolled masters (id/address).
+- `[TYPE <phrase>]` or `[TYPE] <phrase>`
+  - Injects the phrase into the connected host as USB keyboard input (master-only).
+  - Supports minimal escapes: `\\n` (Enter), `\\t` (Tab), `\\r`, `\\\\`.
 
 ## Files
 

@@ -1,5 +1,6 @@
 #include "RakManager.h"
 #include "DatabaseManager.h"
+#include "HostKeyboard.h"
 #include "Logger.h"
 #include "NlpManager.h"
 
@@ -88,6 +89,33 @@ bool asciiIEquals(std::string_view a, std::string_view b) {
 
 bool isAsciiWhitespace(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+std::string unescapeRadioText(std::string_view in) {
+    // Minimal unescape so users can send "\n" / "\t" in a single-line Meshtastic message.
+    std::string out;
+    out.reserve(in.size());
+
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        const char c = in[i];
+        if (c != '\\' || i + 1 >= in.size()) {
+            out.push_back(c);
+            continue;
+        }
+
+        const char n = in[i + 1];
+        switch (n) {
+            case 'n': out.push_back('\n'); ++i; continue;
+            case 'r': out.push_back('\r'); ++i; continue;
+            case 't': out.push_back('\t'); ++i; continue;
+            case '\\': out.push_back('\\'); ++i; continue;
+            default:
+                out.push_back(c);
+                continue;
+        }
+    }
+
+    return out;
 }
 
 const char* routingErrorToString(meshtastic_Routing_Error err) {
@@ -333,6 +361,47 @@ std::string_view nextToken(std::string_view& s) {
     const std::string_view tok = s.substr(0, end);
     s.remove_prefix(end);
     return tok;
+}
+
+bool tryExtractCommandPayload(std::string_view msg, std::string_view expectedCmd, std::string_view& outPayload) {
+    msg = trim(msg);
+    if (msg.size() < 3 || msg.front() != '[') {
+        return false;
+    }
+
+    const std::size_t close = msg.find(']');
+    if (close == std::string_view::npos) {
+        return false;
+    }
+
+    std::string_view inside = msg.substr(1, close - 1);
+    std::string_view after = msg.substr(close + 1);
+
+    inside = trim(inside);
+    after = trim(after);
+
+    if (inside.empty()) {
+        return false;
+    }
+
+    std::string_view tmp = inside;
+    const std::string_view name = nextToken(tmp);
+    if (!asciiIEquals(name, expectedCmd)) {
+        return false;
+    }
+
+    tmp = trim(tmp);
+    if (!tmp.empty()) {
+        outPayload = tmp;
+        return true;  // [CMD payload...]
+    }
+
+    if (!after.empty()) {
+        outPayload = after;
+        return true;  // [CMD] payload...
+    }
+
+    return false;
 }
 
 struct ParsedCommand {
@@ -611,7 +680,8 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
         if (tryParseBracketCommand(text, cmd)) {
             const bool known =
                 asciiIEquals(cmd.name, "HELP") || asciiIEquals(cmd.name, "QUERY") || asciiIEquals(cmd.name, "TABLES") ||
-                asciiIEquals(cmd.name, "SCHEMA") || asciiIEquals(cmd.name, "COUNT") || asciiIEquals(cmd.name, "TAIL");
+                asciiIEquals(cmd.name, "SCHEMA") || asciiIEquals(cmd.name, "COUNT") || asciiIEquals(cmd.name, "TAIL") ||
+                asciiIEquals(cmd.name, "TYPE");
             if (known) {
                 Logger::instance().printf("[RAK][CMD] queued from=%u cmd=%.*s arg0=%.*s arg1=%.*s\n",
                                           from,
@@ -801,6 +871,35 @@ void RakManager::processCommands() {
             }
             return;
         }
+    }
+
+    if (asciiIEquals(parsed.name, "TYPE")) {
+        std::string_view payload;
+        if (!tryExtractCommandPayload(cmd.text, "TYPE", payload)) {
+            send("[RAK] Usage: [TYPE <phrase>] or [TYPE] <phrase>");
+            send("[RAK] Escapes: \\\\n \\\\t \\\\r \\\\\\\\");
+            return;
+        }
+
+        constexpr std::size_t kMaxTypeChars = 220;  // keep well under TEXT_MESSAGE_APP payload constraints
+        payload = trim(payload);
+        if (payload.empty()) {
+            send("[RAK] TYPE: empty phrase.");
+            return;
+        }
+
+        std::string phrase = unescapeRadioText(payload);
+        if (phrase.size() > kMaxTypeChars) {
+            phrase.resize(kMaxTypeChars);
+        }
+
+        Logger::instance().printf("[RAK][TYPE] from=%u len=%u\n", cmd.from, static_cast<unsigned>(phrase.size()));
+        send("[RAK] TYPE: injecting phrase...");
+
+        HostKeyboard::instance().typeText(phrase);
+
+        send("[RAK] TYPE: done.");
+        return;
     }
 
     send("[RAK] Unknown command. Use [HELP].");
