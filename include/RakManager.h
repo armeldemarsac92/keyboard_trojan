@@ -37,6 +37,7 @@ private:
     static void onPrivatePayloadComplete(uint32_t from, uint8_t channel, const std::uint8_t* bytes, std::size_t len);
     void processCommands();
     void pollTypingSessionTimeout(std::uint32_t now);
+    void pollQuerySessionTimeout(std::uint32_t now);
     void enqueueCommand(uint32_t from, uint32_t to, uint8_t channel, const char* text);
 
     struct PendingCommand {
@@ -56,6 +57,15 @@ private:
     };
 
     std::optional<TypingSession> typingSession_{};
+
+    struct QuerySession {
+        uint32_t owner = 0;
+        uint8_t channel = 0;
+        std::uint32_t lastActivityMs = 0;
+        const DBTable* selectedTable = nullptr;
+    };
+
+    std::optional<QuerySession> querySession_{};
 
     // Helper for strings (can be static or instance)
     static const char* meshtastic_portnum_to_string(meshtastic_PortNum port);

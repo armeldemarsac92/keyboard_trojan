@@ -5,6 +5,7 @@
 #include "NlpManager.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdlib>
@@ -453,6 +454,10 @@ const DBTable* findKnownTable(std::string_view name) {
         return &KeyboardConfig::Tables::RadioMasters;
     }
 
+    if (asciiIEquals(name, KeyboardConfig::Tables::Logs.tableName)) {
+        return &KeyboardConfig::Tables::Logs;
+    }
+
     return nullptr;
 }
 
@@ -471,6 +476,61 @@ std::size_t parseSizeOrDefault(std::string_view s, std::size_t fallback) {
         return fallback;
     }
     return static_cast<std::size_t>(v);
+}
+
+bool tryParseLeadingU64(std::string_view s, std::uint64_t& out) {
+    out = 0;
+    s = trim(s);
+    if (s.empty()) {
+        return false;
+    }
+
+    std::size_t n = 0;
+    while (n < s.size() && s[n] >= '0' && s[n] <= '9') {
+        ++n;
+    }
+
+    if (n == 0) {
+        return false;
+    }
+
+    std::string tmp(s.substr(0, n));
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long v = std::strtoull(tmp.c_str(), &end, 10);
+    if (errno != 0 || end == nullptr || end == tmp.c_str() || *end != '\0') {
+        return false;
+    }
+
+    out = static_cast<std::uint64_t>(v);
+    return true;
+}
+
+const std::array<const DBTable*, 3>& queryTables() {
+    static const std::array<const DBTable*, 3> tables = {
+        &KeyboardConfig::Tables::Inputs,
+        &KeyboardConfig::Tables::RadioMasters,
+        &KeyboardConfig::Tables::Logs,
+    };
+    return tables;
+}
+
+const DBTable* resolveQueryTableSelection(std::string_view token) {
+    token = trim(token);
+    if (token.empty()) {
+        return nullptr;
+    }
+
+    std::uint64_t idx = 0;
+    if (tryParseLeadingU64(token, idx)) {
+        const auto& tables = queryTables();
+        if (idx >= 1 && idx <= tables.size()) {
+            return tables[static_cast<std::size_t>(idx - 1)];
+        }
+        return nullptr;
+    }
+
+    return findKnownTable(token);
 }
 }  // namespace
 
@@ -678,6 +738,9 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
         const bool typingSessionActive = instance.typingSession_.has_value();
         const bool isTypingOwner = typingSessionActive && (instance.typingSession_->owner == from);
 
+        const bool querySessionActive = instance.querySession_.has_value();
+        const bool isQueryOwner = querySessionActive && (instance.querySession_->owner == from);
+
         auto reply = [&](std::string_view line) {
             if (line.empty()) {
                 return;
@@ -700,6 +763,14 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             if (asciiIEquals(cmd.name, "TYPE")) {
                 if (!isMaster()) {
                     reply("[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
+                    return;
+                }
+
+                if (querySessionActive) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] TYPE: busy (QUERY session owned by %u).",
+                                  static_cast<unsigned>(instance.querySession_->owner));
+                    reply(buf);
                     return;
                 }
 
@@ -769,6 +840,80 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
                 return;
             }
 
+            if (asciiIEquals(cmd.name, "QUERY")) {
+                if (!isMaster()) {
+                    reply("[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
+                    return;
+                }
+
+                const std::uint32_t nowMs = millis();
+
+                if (typingSessionActive) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] QUERY: busy (TYPE session owned by %u).",
+                                  static_cast<unsigned>(instance.typingSession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                if (instance.querySession_.has_value() && instance.querySession_->owner != from) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] QUERY: busy (session owned by %u).",
+                                  static_cast<unsigned>(instance.querySession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                if (!instance.querySession_.has_value()) {
+                    instance.querySession_ = QuerySession{
+                        .owner = from,
+                        .channel = channel,
+                        .lastActivityMs = nowMs,
+                        .selectedTable = nullptr,
+                    };
+                    Logger::instance().printf("[RAK][QUERY] session started owner=%u ch=%u\n", from, channel);
+                    reply("[RAK] QUERY: session started. Reply with a table number/name. Send [/QUERY] to end (timeout 300s).");
+                } else {
+                    instance.querySession_->channel = channel;
+                    instance.querySession_->lastActivityMs = nowMs;
+                    Logger::instance().printf("[RAK][QUERY] session already active owner=%u ch=%u\n", from, channel);
+                    reply("[RAK] QUERY: session already active. Reply with a table number/name, or send TABLES.");
+                }
+
+                reply("[RAK] Tables:");
+                const auto& tables = queryTables();
+                for (std::size_t i = 0; i < tables.size(); ++i) {
+                    reply(std::to_string(i + 1) + ") " + tables[i]->tableName);
+                }
+                reply("[RAK] Options: TABLES, COUNT, SCHEMA, RANDOM, ROW <id>, SECRETS, [/QUERY]");
+                return;
+            }
+
+            if (asciiIEquals(cmd.name, "/QUERY")) {
+                if (!isMaster()) {
+                    reply("[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
+                    return;
+                }
+
+                if (!instance.querySession_.has_value()) {
+                    reply("[RAK] QUERY: no active session.");
+                    return;
+                }
+
+                if (instance.querySession_->owner != from) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] QUERY: session owned by %u.",
+                                  static_cast<unsigned>(instance.querySession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                instance.querySession_.reset();
+                reply("[RAK] QUERY: session ended.");
+                Logger::instance().printf("[RAK][QUERY] session ended by owner=%u\n", from);
+                return;
+            }
+
             if (isTypingOwner) {
                 instance.typingSession_->lastActivityMs = millis();
                 instance.typingSession_->channel = channel;
@@ -779,6 +924,15 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
                 }
                 Logger::instance().printf("[RAK][TYPE] session text from=%u len=%u\n", from,
                                           static_cast<unsigned>(phrase.size()));
+                return;
+            }
+
+            if (isQueryOwner) {
+                instance.querySession_->lastActivityMs = millis();
+                instance.querySession_->channel = channel;
+                instance.enqueueCommand(from, to, channel, text);
+                Logger::instance().printf("[RAK][QUERY] enqueued text from=%u len=%u\n", from,
+                                          static_cast<unsigned>(std::strlen(text)));
                 return;
             }
 
@@ -807,6 +961,13 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             }
             Logger::instance().printf("[RAK][TYPE] session text from=%u len=%u\n", from,
                                       static_cast<unsigned>(phrase.size()));
+            return;
+        } else if (isQueryOwner) {
+            instance.querySession_->lastActivityMs = millis();
+            instance.querySession_->channel = channel;
+            instance.enqueueCommand(from, to, channel, text);
+            Logger::instance().printf("[RAK][QUERY] enqueued text from=%u len=%u\n", from,
+                                      static_cast<unsigned>(std::strlen(text)));
             return;
         }
     }
@@ -860,22 +1021,6 @@ void RakManager::processCommands() {
         pendingCommands_.pop_front();
     }
 
-    ParsedCommand parsed{};
-    if (!tryParseBracketCommand(cmd.text, parsed)) {
-        Logger::instance().println("[RAK][CMD] parse failed (ignored)");
-        return;
-    }
-
-    Logger::instance().printf("[RAK][CMD] processing from=%u channel=%u cmd=%.*s arg0=%.*s arg1=%.*s\n",
-                              cmd.from,
-                              cmd.channel,
-                              static_cast<int>(parsed.name.size()),
-                              parsed.name.data(),
-                              static_cast<int>(parsed.arg0.size()),
-                              parsed.arg0.data(),
-                              static_cast<int>(parsed.arg1.size()),
-                              parsed.arg1.data());
-
     const bool isMaster = [&]() {
         Threads::Scope scope(mastersMutex_);
         const std::uint64_t fromAddr = static_cast<std::uint64_t>(cmd.from);
@@ -898,17 +1043,351 @@ void RakManager::processCommands() {
         transport_.enqueueText(cmd.from, cmd.channel, std::string(line));
     };
 
+    const bool inQuerySession = querySession_.has_value() && (querySession_->owner == cmd.from);
+    if (inQuerySession) {
+        querySession_->lastActivityMs = millis();
+        querySession_->channel = cmd.channel;
+
+        auto sendQueryTables = [&]() {
+            send("[RAK] Tables:");
+            const auto& tables = queryTables();
+            for (std::size_t i = 0; i < tables.size(); ++i) {
+                send(std::to_string(i + 1) + ") " + tables[i]->tableName);
+            }
+        };
+
+        auto sendQueryHelp = [&]() {
+            send("[RAK] QUERY session:");
+            send(" - Pick a table: reply with its number or name.");
+            send(" - Then: send a rowid number, or: ROW <id>, RANDOM, COUNT, SCHEMA.");
+            send(" - Extra: SECRETS (top unusual words from Inputs).");
+            send(" - TABLES/BACK to pick another table, [/QUERY] to exit.");
+            sendQueryTables();
+        };
+
+        auto sendTableSelectedHeader = [&](const DBTable& table) {
+            send(std::string("[RAK] QUERY: selected table ") + table.tableName + ".");
+
+            std::uint32_t count = 0;
+            if (DatabaseManager::getInstance().countRows(table, count)) {
+                char buf[96]{};
+                std::snprintf(buf, sizeof(buf), "[RAK] %s rows=%u", table.tableName.c_str(),
+                              static_cast<unsigned>(count));
+                send(buf);
+            }
+
+            std::string line;
+            if (DatabaseManager::getInstance().randomRow(table, line)) {
+                send(line);
+            } else {
+                send("[RAK] (no rows)");
+            }
+
+            send("[RAK] Next: rowid | ROW <id> | RANDOM | COUNT | SCHEMA | TABLES | SECRETS | [/QUERY]");
+        };
+
+        auto ensureSelectedTable = [&]() -> const DBTable* {
+            if (querySession_->selectedTable != nullptr) {
+                return querySession_->selectedTable;
+            }
+            return nullptr;
+        };
+
+        const std::string_view msg = trim(cmd.text);
+        if (msg.empty()) {
+            sendQueryHelp();
+            return;
+        }
+
+        ParsedCommand parsed{};
+        if (tryParseBracketCommand(msg, parsed)) {
+            Logger::instance().printf("[RAK][QUERY] cmd=%.*s arg0=%.*s arg1=%.*s\n",
+                                      static_cast<int>(parsed.name.size()),
+                                      parsed.name.data(),
+                                      static_cast<int>(parsed.arg0.size()),
+                                      parsed.arg0.data(),
+                                      static_cast<int>(parsed.arg1.size()),
+                                      parsed.arg1.data());
+
+            if (asciiIEquals(parsed.name, "HELP")) {
+                sendQueryHelp();
+                return;
+            }
+
+            if (asciiIEquals(parsed.name, "TABLES") || asciiIEquals(parsed.name, "BACK")) {
+                querySession_->selectedTable = nullptr;
+                sendQueryTables();
+                return;
+            }
+
+            if (asciiIEquals(parsed.name, "SECRETS")) {
+                const auto lines = DatabaseManager::getInstance().topSecrets(5);
+                if (lines.empty()) {
+                    send("[RAK] SECRETS: no data.");
+                    return;
+                }
+                for (const auto& line : lines) {
+                    send(line);
+                }
+                return;
+            }
+
+            if (asciiIEquals(parsed.name, "SCHEMA")) {
+                const auto* table = parsed.arg0.empty() ? ensureSelectedTable() : resolveQueryTableSelection(parsed.arg0);
+                if (table == nullptr) {
+                    send("[RAK] SCHEMA: select a table first (TABLES).");
+                    return;
+                }
+                send(std::string("[RAK] Schema ") + table->tableName + ":");
+                for (const auto& col : table->columns) {
+                    send(" - " + col.name + " " + col.type);
+                }
+                return;
+            }
+
+            if (asciiIEquals(parsed.name, "COUNT")) {
+                const auto* table = parsed.arg0.empty() ? ensureSelectedTable() : resolveQueryTableSelection(parsed.arg0);
+                if (table == nullptr) {
+                    send("[RAK] COUNT: select a table first (TABLES).");
+                    return;
+                }
+                std::uint32_t count = 0;
+                if (!DatabaseManager::getInstance().countRows(*table, count)) {
+                    send("[RAK] COUNT failed.");
+                    return;
+                }
+                char buf[80]{};
+                std::snprintf(buf, sizeof(buf), "[RAK] COUNT %s = %u", table->tableName.c_str(),
+                              static_cast<unsigned>(count));
+                send(buf);
+                return;
+            }
+
+            if (asciiIEquals(parsed.name, "RANDOM")) {
+                const auto* table = parsed.arg0.empty() ? ensureSelectedTable() : resolveQueryTableSelection(parsed.arg0);
+                if (table == nullptr) {
+                    send("[RAK] RANDOM: select a table first (TABLES).");
+                    return;
+                }
+                std::string line;
+                if (DatabaseManager::getInstance().randomRow(*table, line)) {
+                    send(line);
+                } else {
+                    send("[RAK] (no rows)");
+                }
+                return;
+            }
+
+            if (asciiIEquals(parsed.name, "ROW")) {
+                const DBTable* table = ensureSelectedTable();
+                std::uint64_t rowid = 0;
+
+                if (!parsed.arg1.empty()) {
+                    const auto* maybeTable = resolveQueryTableSelection(parsed.arg0);
+                    if (maybeTable != nullptr && tryParseLeadingU64(parsed.arg1, rowid)) {
+                        table = maybeTable;
+                    } else if (tryParseLeadingU64(parsed.arg0, rowid)) {
+                        // ROW <id>
+                    }
+                } else if (!parsed.arg0.empty()) {
+                    if (!tryParseLeadingU64(parsed.arg0, rowid)) {
+                        const auto* maybeTable = resolveQueryTableSelection(parsed.arg0);
+                        if (maybeTable != nullptr) {
+                            querySession_->selectedTable = maybeTable;
+                            sendTableSelectedHeader(*maybeTable);
+                            return;
+                        }
+                    }
+                }
+
+                if (table == nullptr) {
+                    send("[RAK] ROW: select a table first (TABLES).");
+                    return;
+                }
+
+                if (rowid == 0) {
+                    send("[RAK] ROW: specify a rowid (ROW <id>).");
+                    return;
+                }
+
+                std::string line;
+                if (DatabaseManager::getInstance().rowByRowid(*table, rowid, line)) {
+                    send(line);
+                } else {
+                    send("[RAK] ROW: not found.");
+                }
+                return;
+            }
+
+            // Allow selecting table via [Inputs] etc.
+            if (const auto* table = resolveQueryTableSelection(parsed.name); table != nullptr) {
+                querySession_->selectedTable = table;
+                sendTableSelectedHeader(*table);
+                return;
+            }
+
+            send("[RAK] QUERY: unknown command. Send HELP.");
+            return;
+        }
+
+        std::string_view s = msg;
+        const std::string_view tok0 = nextToken(s);
+        const std::string_view tok1 = nextToken(s);
+
+        if (tok0.empty()) {
+            sendQueryHelp();
+            return;
+        }
+
+        if (asciiIEquals(tok0, "HELP")) {
+            sendQueryHelp();
+            return;
+        }
+
+        if (asciiIEquals(tok0, "TABLES") || asciiIEquals(tok0, "BACK")) {
+            querySession_->selectedTable = nullptr;
+            sendQueryTables();
+            return;
+        }
+
+        if (asciiIEquals(tok0, "SECRETS")) {
+            const auto lines = DatabaseManager::getInstance().topSecrets(5);
+            if (lines.empty()) {
+                send("[RAK] SECRETS: no data.");
+                return;
+            }
+            for (const auto& line : lines) {
+                send(line);
+            }
+            return;
+        }
+
+        if (asciiIEquals(tok0, "COUNT")) {
+            const auto* table = tok1.empty() ? ensureSelectedTable() : resolveQueryTableSelection(tok1);
+            if (table == nullptr) {
+                send("[RAK] COUNT: select a table first (TABLES).");
+                return;
+            }
+
+            std::uint32_t count = 0;
+            if (!DatabaseManager::getInstance().countRows(*table, count)) {
+                send("[RAK] COUNT failed.");
+                return;
+            }
+
+            char buf[80]{};
+            std::snprintf(buf, sizeof(buf), "[RAK] COUNT %s = %u", table->tableName.c_str(),
+                          static_cast<unsigned>(count));
+            send(buf);
+            return;
+        }
+
+        if (asciiIEquals(tok0, "SCHEMA")) {
+            const auto* table = tok1.empty() ? ensureSelectedTable() : resolveQueryTableSelection(tok1);
+            if (table == nullptr) {
+                send("[RAK] SCHEMA: select a table first (TABLES).");
+                return;
+            }
+            send(std::string("[RAK] Schema ") + table->tableName + ":");
+            for (const auto& col : table->columns) {
+                send(" - " + col.name + " " + col.type);
+            }
+            return;
+        }
+
+        if (asciiIEquals(tok0, "RANDOM")) {
+            const auto* table = tok1.empty() ? ensureSelectedTable() : resolveQueryTableSelection(tok1);
+            if (table == nullptr) {
+                send("[RAK] RANDOM: select a table first (TABLES).");
+                return;
+            }
+            std::string line;
+            if (DatabaseManager::getInstance().randomRow(*table, line)) {
+                send(line);
+            } else {
+                send("[RAK] (no rows)");
+            }
+            return;
+        }
+
+        if (asciiIEquals(tok0, "ROW")) {
+            const auto* table = ensureSelectedTable();
+            if (table == nullptr) {
+                send("[RAK] ROW: select a table first (TABLES).");
+                return;
+            }
+
+            std::uint64_t rowid = 0;
+            if (!tryParseLeadingU64(tok1, rowid) || rowid == 0) {
+                send("[RAK] ROW: specify a rowid (ROW <id>).");
+                return;
+            }
+
+            std::string line;
+            if (DatabaseManager::getInstance().rowByRowid(*table, rowid, line)) {
+                send(line);
+            } else {
+                send("[RAK] ROW: not found.");
+            }
+            return;
+        }
+
+        // Table selection by number or name.
+        if (const auto* table = resolveQueryTableSelection(tok0); table != nullptr) {
+            querySession_->selectedTable = table;
+            sendTableSelectedHeader(*table);
+            return;
+        }
+
+        // Row selection by raw rowid (only after table selection).
+        if (querySession_->selectedTable != nullptr) {
+            std::uint64_t rowid = 0;
+            if (tryParseLeadingU64(tok0, rowid) && rowid != 0) {
+                std::string line;
+                if (DatabaseManager::getInstance().rowByRowid(*querySession_->selectedTable, rowid, line)) {
+                    send(line);
+                } else {
+                    send("[RAK] ROW: not found.");
+                }
+                return;
+            }
+        }
+
+        send("[RAK] QUERY: unrecognized. Send HELP or TABLES.");
+        return;
+    }
+
+    ParsedCommand parsed{};
+    if (!tryParseBracketCommand(cmd.text, parsed)) {
+        Logger::instance().println("[RAK][CMD] parse failed (ignored)");
+        return;
+    }
+
+    Logger::instance().printf("[RAK][CMD] processing from=%u channel=%u cmd=%.*s arg0=%.*s arg1=%.*s\n",
+                              cmd.from,
+                              cmd.channel,
+                              static_cast<int>(parsed.name.size()),
+                              parsed.name.data(),
+                              static_cast<int>(parsed.arg0.size()),
+                              parsed.arg0.data(),
+                              static_cast<int>(parsed.arg1.size()),
+                              parsed.arg1.data());
+
     auto sendTables = [&]() {
         send("[RAK] Available tables:");
         send(" - Inputs");
         send(" - RadioMasters");
+        send(" - Logs");
     };
 
-    if (asciiIEquals(parsed.name, "HELP") || asciiIEquals(parsed.name, "QUERY")) {
-        send("[RAK] ACK QUERY. What data do you want to query from the DB?");
-        sendTables();
-        send("[RAK] Commands: [SCHEMA <table>]  [COUNT <table>]  [TAIL Inputs <n>]");
-        send("[RAK] Keyboard: [TYPE] to start typing session, [/TYPE] to end (or 5 min idle).");
+    if (asciiIEquals(parsed.name, "HELP")) {
+        send("[RAK] Commands:");
+        send(" - Pair (DM): PAIR:<secret>");
+        send(" - [HELP]");
+        send(" - [TYPE] (start typing)  [/TYPE] (end)");
+        send(" - [QUERY] (start DB session)  [/QUERY] (end)");
+        send(" - [TABLES]  [SCHEMA <table>]  [COUNT <table>]  [TAIL Inputs <n>]");
+        send(" - In QUERY session you can reply with: table#, table name, ROW <id>, RANDOM, SECRETS.");
         return;
     }
 
@@ -1009,6 +1488,23 @@ void RakManager::pollTypingSessionTimeout(std::uint32_t now) {
     transport_.enqueueText(owner, channel, "[RAK] TYPE: session ended (timeout).");
 }
 
+void RakManager::pollQuerySessionTimeout(std::uint32_t now) {
+    if (!querySession_.has_value()) {
+        return;
+    }
+
+    constexpr std::uint32_t kTimeoutMs = 5U * 60U * 1000U;
+    if (now - querySession_->lastActivityMs < kTimeoutMs) {
+        return;
+    }
+
+    const auto owner = querySession_->owner;
+    const auto channel = querySession_->channel;
+    querySession_.reset();
+    transport_.enqueueText(owner, channel, "[RAK] QUERY: session ended (timeout).");
+    Logger::instance().printf("[RAK][QUERY] session ended by timeout owner=%u\n", static_cast<unsigned>(owner));
+}
+
 
 void RakManager::begin() {
     constexpr std::uint32_t kBootDelayMs = 5'000U;
@@ -1060,6 +1556,7 @@ void RakManager::listenerThread(void* arg) {
         // Handle queued commands outside of mt_loop() callbacks.
         instance.processCommands();
         instance.pollTypingSessionTimeout(now);
+        instance.pollQuerySessionTimeout(now);
 
         if (now - lastActionTime >= kHeartbeatIntervalMs) {
             lastActionTime = now;

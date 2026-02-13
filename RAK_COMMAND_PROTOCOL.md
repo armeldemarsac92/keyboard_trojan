@@ -4,7 +4,11 @@ Branch: `fix/top5-hardening`
 
 ## Goal
 
-Provide a simple, master-only command listener over Meshtastic `TEXT_MESSAGE_APP` to query high-level DB state and schema.
+Provide a simple, master-only command listener over Meshtastic `TEXT_MESSAGE_APP` to:
+
+- Control a typing session (`[TYPE]`)
+- Run an interactive DB query session (`[QUERY]`)
+- Inspect high-level DB state and schema
 
 Important constraints:
 
@@ -37,10 +41,10 @@ Notes:
 
 ## Commands
 
-All commands are bracketed and case-insensitive:
+All bracketed commands are case-insensitive:
 
-- `[HELP]` or `[QUERY]`
-  - Shows available tables and example commands.
+- `[HELP]`
+  - Shows command overview (does not start a session).
 - `[TABLES]`
   - Lists tables exposed by the firmware.
 - `[SCHEMA <table>]`
@@ -51,6 +55,13 @@ All commands are bracketed and case-insensitive:
   - Returns up to 10 latest rows from `Inputs` (`InputID`, `Timestamp`, `Input`), with input truncated.
 - `[TAIL RadioMasters]`
   - Lists enrolled masters (id/address).
+- `[QUERY]` (start interactive DB session)
+  - Opens an interactive query session (master-only, DM-only).
+  - The firmware replies with a numbered table list (one message per table).
+  - After this, any subsequent DM messages from the session owner are interpreted as query inputs (not typed, not sent to NLP).
+  - End the session with `[/QUERY]` or after 5 minutes of inactivity.
+- `[/QUERY]` (end interactive DB session)
+  - Ends the active query session.
 - `[TYPE]` (start typing session)
   - Opens a typing session (master-only). Any subsequent direct messages from that master are injected into the host as USB keyboard input.
   - Only one typing session can be active at a time (owned by the master who started it).
@@ -61,6 +72,18 @@ All commands are bracketed and case-insensitive:
   - Layout: injection uses the firmware's **AZERTY** key mapping (`AzertyLayout`), so the host should be configured for AZERTY to get the intended characters.
 - `[/TYPE]` (end typing session)
   - Ends the active typing session and clears any queued injected text.
+
+## Query Session Inputs
+
+Once you start a query session with `[QUERY]`, you can reply with plain text (no brackets required):
+
+- Select a table: `1` or `Inputs` (also accepts `2`/`RadioMasters`, `3`/`Logs`)
+- Fetch a random row: `RANDOM`
+- Fetch a specific row: `ROW 123` or just `123`
+- Count rows: `COUNT`
+- Show schema: `SCHEMA`
+- Return to table selection: `TABLES` or `BACK`
+- Show "secrets" (Inputs only): `SECRETS` (top words by frequency with p90 entropy/variance thresholds)
 
 ## Files
 
