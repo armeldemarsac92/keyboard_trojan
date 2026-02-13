@@ -254,33 +254,34 @@ bool queryRowidRangeUnlocked(sqlite3* db, const std::string& tableName, std::uin
         return false;
     }
 
-    const std::string sql = "SELECT MIN(rowid), MAX(rowid) FROM " + tableName + ";";
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return false;
-    }
+    // Avoid aggregates like MIN/MAX which can degrade to full-table scans depending on query planner settings.
+    // These ORDER BY/LIMIT queries should hit the table b-tree extremes quickly.
+    auto selectEdge = [&](const char* orderBy, std::uint64_t& out) -> bool {
+        out = 0;
+        const std::string sql = "SELECT rowid FROM " + tableName + " ORDER BY rowid " + orderBy + " LIMIT 1;";
+        sqlite3_stmt* stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            return false;
+        }
 
-    rc = sqlite3_step(stmt);
-    if (rc == SQLITE_ROW) {
-        if (sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
+        rc = sqlite3_step(stmt);
+        if (rc == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
             const auto v = sqlite3_column_int64(stmt, 0);
             if (v > 0) {
-                outMin = static_cast<std::uint64_t>(v);
+                out = static_cast<std::uint64_t>(v);
             }
+            sqlite3_finalize(stmt);
+            return out != 0;
         }
-        if (sqlite3_column_type(stmt, 1) != SQLITE_NULL) {
-            const auto v = sqlite3_column_int64(stmt, 1);
-            if (v > 0) {
-                outMax = static_cast<std::uint64_t>(v);
-            }
-        }
-        sqlite3_finalize(stmt);
-        return true;
-    }
 
-    sqlite3_finalize(stmt);
-    return false;
+        sqlite3_finalize(stmt);
+        return false;
+    };
+
+    const bool okMin = selectEdge("ASC", outMin);
+    const bool okMax = selectEdge("DESC", outMax);
+    return okMin && okMax;
 }
 
 bool queryRowByRowidUnlocked(sqlite3* db, const std::string& tableName, std::uint64_t rowid, std::string& outLine) {
@@ -706,6 +707,12 @@ bool DatabaseManager::rowidRange(const DBTable& table, std::uint64_t& outMinRowi
 
     const bool ok = queryRowidRangeUnlocked(dbConnection, table.tableName, outMinRowid, outMaxRowid);
     (void)sqlite3_db_release_memory(dbConnection);
+    if (ok) {
+        Logger::instance().printf("[DB][Q] ROWID RANGE %s => %llu..%llu\n",
+                                  table.tableName.c_str(),
+                                  static_cast<unsigned long long>(outMinRowid),
+                                  static_cast<unsigned long long>(outMaxRowid));
+    }
     return ok;
 }
 
