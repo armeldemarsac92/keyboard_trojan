@@ -11,6 +11,7 @@
 #include "Logger.h"
 #include "NlpManager.h"
 #include "RakManager.h"
+#include "UsbKeyboardMutex.h"
 
 USBHost myusb;
 USBHub hub1(myusb);
@@ -69,6 +70,7 @@ void loop() {
 
     // Check the data at the calculated offset
     if (custom_feature_buffer[dataOffset] == kCommandA) {
+      Threads::Scope lock(usbKeyboardMutex());
       Keyboard.println("PC Command A: Triggered!");
     }
 
