@@ -27,6 +27,7 @@ public:
     void setPayloadCompleteCallback(PayloadCompleteCallback cb);
 
     void enqueueText(uint32_t dest, uint8_t channel, std::string text);
+    void enqueueTextReliable(uint32_t dest, uint8_t channel, std::string text);
     void enqueueReliable(uint32_t dest, uint8_t channel, std::vector<std::uint8_t> payload);
     void enqueueReliable(uint32_t dest, uint8_t channel, std::vector<std::uint8_t> payload, ReliableOptions options);
 
@@ -41,6 +42,9 @@ private:
         uint32_t dest = BROADCAST_ADDR;
         uint8_t channel = 0;
         std::string text;
+        bool waitForAck = false;             // stop-and-wait at the app layer (based on ROUTING_APP acks)
+        std::uint32_t ackTimeoutMs = 0;      // resend after this duration
+        std::uint8_t maxRetries = 0;         // retries after the initial send
     };
 
     struct OutboundTransfer {
@@ -90,12 +94,24 @@ private:
     ReliableOptions defaults_{};
 
     Threads::Mutex mutex_;
-    std::deque<OutboundText> pendingText_;
+    std::deque<OutboundText> pendingTextHigh_;
+    std::deque<OutboundText> pendingTextLow_;
     std::deque<OutboundTransfer> pendingTransfers_;
     std::deque<InboundFrame> inboundFrames_;
 
     std::deque<OutboundFrame> immediateFrames_;
     std::vector<InboundTransfer> inboundTransfers_;
+
+    struct InFlightText {
+        bool active = false;
+        OutboundText msg{};
+        std::uint32_t pktId = 0;
+        std::uint32_t nextRetryMs = 0;
+        std::uint8_t attempts = 0;  // successful sends; max = 1 + maxRetries
+    };
+
+    InFlightText inFlightText_{};
+    std::uint32_t nextTextSendAllowedMs_ = 0;
 
     bool hasActiveTransfer_ = false;
     OutboundTransfer activeTransfer_{};

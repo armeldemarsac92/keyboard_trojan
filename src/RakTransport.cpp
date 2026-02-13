@@ -154,7 +154,7 @@ bool canSendNow() {
 }
 
 bool sendDecodedPacket(meshtastic_PortNum portNum, uint32_t dest, uint8_t channel, const std::uint8_t* bytes,
-                       std::size_t len, std::uint32_t* outMeshPacketId = nullptr) {
+                       std::size_t len, std::uint32_t* outMeshPacketId = nullptr, std::uint32_t forcedPacketId = 0) {
     if (!canSendNow()) {
         return false;
     }
@@ -169,7 +169,14 @@ bool sendDecodedPacket(meshtastic_PortNum portNum, uint32_t dest, uint8_t channe
 
     meshtastic_MeshPacket meshPacket = meshtastic_MeshPacket_init_default;
     meshPacket.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
-    meshPacket.id = random(0x7FFFFFFF);
+    std::uint32_t pktId = forcedPacketId;
+    if (pktId == 0U) {
+        pktId = static_cast<std::uint32_t>(random(0x7FFFFFFF));
+        if (pktId == 0U) {
+            pktId = 1U;
+        }
+    }
+    meshPacket.id = pktId;
     if (outMeshPacketId != nullptr) {
         *outMeshPacketId = meshPacket.id;
     }
@@ -209,6 +216,20 @@ std::uint16_t computeChunkCount(std::size_t totalLen) {
 
     return static_cast<std::uint16_t>(chunks);
 }
+
+const meshtastic_Data* tryGetDataFromPayload(const meshtastic_Data_payload_t* payload) {
+    if (payload == nullptr) {
+        return nullptr;
+    }
+
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(payload);
+    const auto* data = reinterpret_cast<const meshtastic_Data*>(bytes - offsetof(meshtastic_Data, payload));
+    if (&data->payload != payload) {
+        return nullptr;
+    }
+
+    return data;
+}
 }  // namespace
 
 void RakTransport::setPayloadCompleteCallback(PayloadCompleteCallback cb) {
@@ -227,18 +248,28 @@ void RakTransport::enqueueText(uint32_t dest, uint8_t channel, std::string text)
             preview[shown] = '\0';
         }
 
-        std::size_t pending = 0;
+        std::size_t pendingHigh = 0;
+        std::size_t pendingLow = 0;
         {
             Threads::Scope scope(mutex_);
-            pendingText_.push_back(OutboundText{dest, channel, std::move(text)});
-            pending = pendingText_.size();
+            constexpr std::size_t kMaxPendingLow = 20;
+            if (pendingTextLow_.size() >= kMaxPendingLow) {
+                pendingTextLow_.pop_front();
+                Logger::instance().println("[RAK][TXQ] text queue low full, dropping oldest");
+            }
+            pendingTextLow_.push_back(OutboundText{dest, channel, std::move(text)});
+            pendingHigh = pendingTextHigh_.size();
+            pendingLow = pendingTextLow_.size();
         }
 
-        Logger::instance().printf("[RAK][TXQ] text enqueued dest=%u ch=%u len=%u pending=%u preview=\"%.*s%s\"\n",
+        Logger::instance().printf(
+            "[RAK][TXQ] text enqueued dest=%u ch=%u len=%u pending=%u(h=%u l=%u) preview=\"%.*s%s\"\n",
                                   dest,
                                   channel,
                                   static_cast<unsigned>(len),
-                                  static_cast<unsigned>(pending),
+                                  static_cast<unsigned>(pendingHigh + pendingLow),
+                                  static_cast<unsigned>(pendingHigh),
+                                  static_cast<unsigned>(pendingLow),
                                   static_cast<int>(shown),
                                   preview,
                                   (len > shown) ? "..." : "");
@@ -246,7 +277,71 @@ void RakTransport::enqueueText(uint32_t dest, uint8_t channel, std::string text)
     }
 
     Threads::Scope scope(mutex_);
-    pendingText_.push_back(OutboundText{dest, channel, std::move(text)});
+    constexpr std::size_t kMaxPendingLow = 20;
+    if (pendingTextLow_.size() >= kMaxPendingLow) {
+        pendingTextLow_.pop_front();
+    }
+    pendingTextLow_.push_back(OutboundText{dest, channel, std::move(text)});
+}
+
+void RakTransport::enqueueTextReliable(uint32_t dest, uint8_t channel, std::string text) {
+    // For interactive command replies we prefer a paced stop-and-wait send with retries.
+    constexpr std::uint32_t kAckTimeoutMs = 8'000U;
+    constexpr std::uint8_t kMaxRetries = 2U;
+
+    if constexpr (Logger::enabled()) {
+        constexpr std::size_t kPreviewChars = 60;
+        const std::size_t len = text.size();
+        const std::size_t shown = std::min<std::size_t>(len, kPreviewChars);
+
+        char preview[kPreviewChars + 1]{};
+        if (shown > 0) {
+            std::memcpy(preview, text.data(), shown);
+            preview[shown] = '\0';
+        }
+
+        std::size_t pendingHigh = 0;
+        std::size_t pendingLow = 0;
+        {
+            Threads::Scope scope(mutex_);
+            constexpr std::size_t kMaxPendingHigh = 40;
+            if (pendingTextHigh_.size() >= kMaxPendingHigh) {
+                pendingTextHigh_.pop_front();
+                Logger::instance().println("[RAK][TXQ] text queue high full, dropping oldest");
+            }
+            OutboundText msg{dest, channel, std::move(text)};
+            msg.waitForAck = true;
+            msg.ackTimeoutMs = kAckTimeoutMs;
+            msg.maxRetries = kMaxRetries;
+            pendingTextHigh_.push_back(std::move(msg));
+            pendingHigh = pendingTextHigh_.size();
+            pendingLow = pendingTextLow_.size();
+        }
+
+        Logger::instance().printf(
+            "[RAK][TXQ] text reliable enqueued dest=%u ch=%u len=%u pending=%u(h=%u l=%u) preview=\"%.*s%s\"\n",
+            dest,
+            channel,
+            static_cast<unsigned>(len),
+            static_cast<unsigned>(pendingHigh + pendingLow),
+            static_cast<unsigned>(pendingHigh),
+            static_cast<unsigned>(pendingLow),
+            static_cast<int>(shown),
+            preview,
+            (len > shown) ? "..." : "");
+        return;
+    }
+
+    Threads::Scope scope(mutex_);
+    constexpr std::size_t kMaxPendingHigh = 40;
+    if (pendingTextHigh_.size() >= kMaxPendingHigh) {
+        pendingTextHigh_.pop_front();
+    }
+    OutboundText msg{dest, channel, std::move(text)};
+    msg.waitForAck = true;
+    msg.ackTimeoutMs = kAckTimeoutMs;
+    msg.maxRetries = kMaxRetries;
+    pendingTextHigh_.push_back(std::move(msg));
 }
 
 void RakTransport::enqueueReliable(uint32_t dest, uint8_t channel, std::vector<std::uint8_t> payload) {
@@ -294,6 +389,54 @@ void RakTransport::enqueueReliable(uint32_t dest, uint8_t channel, std::vector<s
 
 void RakTransport::onPortnumPacket(uint32_t from, uint32_t to, uint8_t channel, meshtastic_PortNum port,
                                   const meshtastic_Data_payload_t* payload) {
+    if (port == meshtastic_PortNum_ROUTING_APP) {
+        if (payload == nullptr) {
+            return;
+        }
+
+        const meshtastic_Data* data = tryGetDataFromPayload(payload);
+        if (data == nullptr || data->request_id == 0U) {
+            return;
+        }
+
+        meshtastic_Routing routing = meshtastic_Routing_init_zero;
+        pb_istream_t stream = pb_istream_from_buffer(payload->bytes, payload->size);
+        if (!pb_decode(&stream, meshtastic_Routing_fields, &routing)) {
+            return;
+        }
+
+        if (routing.which_variant != meshtastic_Routing_error_reason_tag) {
+            return;
+        }
+
+        const std::uint32_t reqId = data->request_id;
+        const auto err = routing.error_reason;
+
+        Threads::Scope scope(mutex_);
+        if (!inFlightText_.active || inFlightText_.pktId != reqId) {
+            return;
+        }
+
+        if (err == meshtastic_Routing_Error_NONE) {
+            Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP ack reqId=%u\n", static_cast<unsigned>(reqId));
+            inFlightText_.active = false;
+            inFlightText_.pktId = 0;
+            inFlightText_.attempts = 0;
+            inFlightText_.nextRetryMs = 0;
+            inFlightText_.msg = OutboundText{};
+            return;
+        }
+
+        // Error or NAK: back off slightly then retry (serviceOutbound will handle max retry count).
+        constexpr std::uint32_t kErrorRetryDelayMs = 1'500U;
+        inFlightText_.nextRetryMs = millis() + kErrorRetryDelayMs;
+        Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP error reqId=%u reason=%d retry_in=%u\n",
+                                  static_cast<unsigned>(reqId),
+                                  static_cast<int>(err),
+                                  static_cast<unsigned>(kErrorRetryDelayMs));
+        return;
+    }
+
     if (port != meshtastic_PortNum_PRIVATE_APP) {
         return;
     }
@@ -590,14 +733,74 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
         return;
     }
 
-    OutboundText text;
-    {
-        Threads::Scope scope(mutex_);
-        if (pendingText_.empty()) {
+    constexpr std::uint32_t kMinTextIntervalMs = 350U;
+    if (nowMs < nextTextSendAllowedMs_) {
+        return;
+    }
+
+    // Stop-and-wait: while waiting for a ROUTING_APP ack, don't send more text (avoid radio queue overload).
+    if (inFlightText_.active) {
+        if (nowMs < inFlightText_.nextRetryMs) {
             return;
         }
-        text = std::move(pendingText_.front());
-        pendingText_.pop_front();
+
+        const std::uint8_t maxAttempts = static_cast<std::uint8_t>(1U + inFlightText_.msg.maxRetries);
+        if (inFlightText_.attempts >= maxAttempts) {
+            Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP give up reqId=%u attempts=%u\n",
+                                      static_cast<unsigned>(inFlightText_.pktId),
+                                      static_cast<unsigned>(inFlightText_.attempts));
+            Threads::Scope scope(mutex_);
+            inFlightText_.active = false;
+            inFlightText_.pktId = 0;
+            inFlightText_.attempts = 0;
+            inFlightText_.nextRetryMs = 0;
+            inFlightText_.msg = OutboundText{};
+            return;
+        }
+
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(inFlightText_.msg.text.data());
+        const std::size_t len = inFlightText_.msg.text.size();
+        const std::size_t safeLen = std::min<std::size_t>(len, kMaxDecodedPayloadBytes);
+        constexpr std::size_t kPreviewChars = 60;
+        const std::size_t shown = std::min<std::size_t>(safeLen, kPreviewChars);
+
+        Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP retry dest=%u ch=%u len=%u attempt=%u/%u reqId=%u preview=\"%.*s%s\"\n",
+                                  inFlightText_.msg.dest,
+                                  inFlightText_.msg.channel,
+                                  static_cast<unsigned>(safeLen),
+                                  static_cast<unsigned>(inFlightText_.attempts + 1),
+                                  static_cast<unsigned>(maxAttempts),
+                                  static_cast<unsigned>(inFlightText_.pktId),
+                                  static_cast<int>(shown),
+                                  inFlightText_.msg.text.c_str(),
+                                  (safeLen > shown) ? "..." : "");
+
+        std::uint32_t pktId = 0;
+        if (sendDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, inFlightText_.msg.dest, inFlightText_.msg.channel,
+                              bytes, safeLen, &pktId, inFlightText_.pktId)) {
+            inFlightText_.attempts = static_cast<std::uint8_t>(inFlightText_.attempts + 1);
+            inFlightText_.nextRetryMs = nowMs + inFlightText_.msg.ackTimeoutMs;
+            nextTextSendAllowedMs_ = nowMs + kMinTextIntervalMs;
+            Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP queued to radio pktId=%u\n",
+                                      static_cast<unsigned>(pktId));
+        }
+        return;
+    }
+
+    OutboundText text;
+    bool fromHigh = false;
+    {
+        Threads::Scope scope(mutex_);
+        if (!pendingTextHigh_.empty()) {
+            text = std::move(pendingTextHigh_.front());
+            pendingTextHigh_.pop_front();
+            fromHigh = true;
+        } else if (!pendingTextLow_.empty()) {
+            text = std::move(pendingTextLow_.front());
+            pendingTextLow_.pop_front();
+        } else {
+            return;
+        }
     }
 
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(text.text.data());
@@ -625,8 +828,23 @@ void RakTransport::serviceOutbound(std::uint32_t nowMs) {
                                   static_cast<unsigned>(pb_size),
                                   static_cast<unsigned>(pktId));
         Threads::Scope scope(mutex_);
-        pendingText_.push_front(std::move(text));
+        if (fromHigh || text.waitForAck) {
+            pendingTextHigh_.push_front(std::move(text));
+        } else {
+            pendingTextLow_.push_front(std::move(text));
+        }
     } else {
         Logger::instance().printf("[RAK][TX] TEXT_MESSAGE_APP queued to radio pktId=%u\n", pktId);
+
+        nextTextSendAllowedMs_ = nowMs + kMinTextIntervalMs;
+
+        if (text.waitForAck) {
+            Threads::Scope scope(mutex_);
+            inFlightText_.active = true;
+            inFlightText_.msg = std::move(text);
+            inFlightText_.pktId = pktId;
+            inFlightText_.attempts = 1;
+            inFlightText_.nextRetryMs = nowMs + inFlightText_.msg.ackTimeoutMs;
+        }
     }
 }

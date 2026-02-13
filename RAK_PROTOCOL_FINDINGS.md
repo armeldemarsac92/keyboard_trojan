@@ -202,6 +202,34 @@ Mitigation implemented:
 - `RakTransport` checks the internal `pb_size` global and only sends when `pb_size == 0`.
 - This is still an internal coupling to Meshtastic-arduino (`pb_size` and `_mt_send_toRadio` are not public API).
 
+## Text Reply Reliability (COMMAND/QUERY Replies)
+
+Symptom observed while building `[QUERY]` and other multi-line replies:
+
+- The phone/app would sometimes receive the first reply line (ex: `"working..."`) but miss subsequent lines,
+  even though the firmware logged `[RAK][TX] ... queued to radio pktId=...`.
+
+Hypothesis:
+
+- Sending many `TEXT_MESSAGE_APP` packets back-to-back can overflow the radio/router queues or exceed duty-cycle / rate limits.
+- Even if `_mt_send_toRadio(...)` returns true, the downstream mesh might drop or defer packets.
+
+Fix implemented in `RakTransport`:
+
+- Added two outbound text queues:
+  - **High**: interactive command replies (`enqueueTextReliable`)
+  - **Low**: background chatter like heartbeats/AI notifications (`enqueueText`)
+- Added a paced stop-and-wait mode for high priority text:
+  - send 1 `TEXT_MESSAGE_APP`, then wait for a matching `ROUTING_APP` ACK
+  - ACK correlation uses `Data.request_id` (enclosing decoded packet) which maps to the original `MeshPacket.id`
+  - if no ACK arrives within `ackTimeoutMs`, resend (same packet id) up to `maxRetries`
+  - apply a minimum inter-send delay to avoid flooding the serial/radio stack
+- Both queues are bounded to avoid runaway heap growth if the mesh is down.
+
+Result:
+
+- Multi-line replies (table lists, secrets, random rows, etc.) should arrive much more consistently.
+
 ### Fragmentation frame format (binary)
 
 Use `PortNum.PRIVATE_APP` and put a small header in `meshtastic_Data.payload`.

@@ -544,7 +544,7 @@ RakManager::RakManager() {
 }
 
 void RakManager::dbReplyCallback(std::uint32_t dest, std::uint8_t channel, std::string text) {
-    RakManager::getInstance().transport_.enqueueText(dest, channel, std::move(text));
+    RakManager::getInstance().transport_.enqueueTextReliable(dest, channel, std::move(text));
 }
 
 void RakManager::loadSettingsFromDb() {
@@ -699,14 +699,14 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             Logger::instance().printf("[RAK][PAIR] request from=%u\n", from);
             if (!isEnrollmentSecretConfigured()) {
                 Logger::instance().println("[RAK] Enrollment disabled: set a strong MasterEnrollmentSecret in KeyboardConfig.");
-                instance.transport_.enqueueText(from, channel,
+                instance.transport_.enqueueTextReliable(from, channel,
                                                 "[RAK] Enrollment disabled. Set MasterEnrollmentSecret in KeyboardConfig and reflash.");
                 return;
             }
 
             if (!constantTimeEquals(suppliedSecret, KeyboardConfig::Security::MasterEnrollmentSecret)) {
                 Logger::instance().printf("[RAK] Enrollment rejected for node %u: invalid credentials.\n", from);
-                instance.transport_.enqueueText(from, channel, "[RAK] Pair rejected: invalid secret.");
+                instance.transport_.enqueueTextReliable(from, channel, "[RAK] Pair rejected: invalid secret.");
                 return;
             }
 
@@ -730,11 +730,11 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
 
             if (alreadyEnrolled) {
                 Logger::instance().printf("[RAK] Node %u is already enrolled as master.\n", from);
-                instance.transport_.enqueueText(from, channel, "[RAK] Already paired.");
+                instance.transport_.enqueueTextReliable(from, channel, "[RAK] Already paired.");
             } else if (added) {
                 DatabaseManager::getInstance().saveData({std::to_string(from)}, KeyboardConfig::Tables::RadioMasters);
                 Logger::instance().printf("[RAK] Added new master node: %u\n", from);
-                instance.transport_.enqueueText(from, channel, "[RAK] Paired OK. Use [HELP].");
+                instance.transport_.enqueueTextReliable(from, channel, "[RAK] Paired OK. Use [HELP].");
             }
             return;
         }
@@ -749,7 +749,7 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             if (line.empty()) {
                 return;
             }
-            instance.transport_.enqueueText(from, channel, std::string(line));
+            instance.transport_.enqueueTextReliable(from, channel, std::string(line));
         };
 
         auto isMaster = [&]() {
@@ -924,7 +924,7 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
 
                 const std::string phrase = unescapeRadioText(text);
                 if (!HostKeyboard::instance().enqueueTypeText(phrase)) {
-                    instance.transport_.enqueueText(from, channel, "[RAK] TYPE: queue full (slow down).");
+                    instance.transport_.enqueueTextReliable(from, channel, "[RAK] TYPE: queue full (slow down).");
                 }
                 Logger::instance().printf("[RAK][TYPE] session text from=%u len=%u\n", from,
                                           static_cast<unsigned>(phrase.size()));
@@ -961,7 +961,7 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
 
             const std::string phrase = unescapeRadioText(text);
             if (!HostKeyboard::instance().enqueueTypeText(phrase)) {
-                instance.transport_.enqueueText(from, channel, "[RAK] TYPE: queue full (slow down).");
+                instance.transport_.enqueueTextReliable(from, channel, "[RAK] TYPE: queue full (slow down).");
             }
             Logger::instance().printf("[RAK][TYPE] session text from=%u len=%u\n", from,
                                       static_cast<unsigned>(phrase.size()));
@@ -1035,7 +1035,7 @@ void RakManager::processCommands() {
 
     if (!isMaster) {
         Logger::instance().printf("[RAK][CMD] unauthorized from=%u\n", cmd.from);
-        transport_.enqueueText(cmd.from, cmd.channel, "[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
+        transport_.enqueueTextReliable(cmd.from, cmd.channel, "[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
         return;
     }
 
@@ -1044,7 +1044,7 @@ void RakManager::processCommands() {
             return;
         }
         Logger::instance().printf("[RAK][CMD] reply to=%u len=%u\n", cmd.from, static_cast<unsigned>(line.size()));
-        transport_.enqueueText(cmd.from, cmd.channel, std::string(line));
+        transport_.enqueueTextReliable(cmd.from, cmd.channel, std::string(line));
     };
 
     const bool inQuerySession = querySession_.has_value() && (querySession_->owner == cmd.from);
@@ -1438,7 +1438,7 @@ void RakManager::pollTypingSessionTimeout(std::uint32_t now) {
 
     typingSession_.reset();
     HostKeyboard::instance().cancelAll();
-    transport_.enqueueText(owner, channel, "[RAK] TYPE: session ended (timeout).");
+    transport_.enqueueTextReliable(owner, channel, "[RAK] TYPE: session ended (timeout).");
 }
 
 void RakManager::pollQuerySessionTimeout(std::uint32_t now) {
@@ -1454,7 +1454,7 @@ void RakManager::pollQuerySessionTimeout(std::uint32_t now) {
     const auto owner = querySession_->owner;
     const auto channel = querySession_->channel;
     querySession_.reset();
-    transport_.enqueueText(owner, channel, "[RAK] QUERY: session ended (timeout).");
+    transport_.enqueueTextReliable(owner, channel, "[RAK] QUERY: session ended (timeout).");
     Logger::instance().printf("[RAK][QUERY] session ended by timeout owner=%u\n", static_cast<unsigned>(owner));
 }
 
