@@ -7,7 +7,6 @@
 #include <keylayouts.h>
 #include <usb_keyboard.h>
 
-#include "AzertyLayout.h"
 #include "Logger.h"
 
 namespace {
@@ -18,34 +17,6 @@ struct KeyCombo {
     std::uint8_t mods = 0;
     bool valid = false;
 };
-
-[[nodiscard]] std::array<KeyCombo, 256> buildAzertyReverseMap() {
-    std::array<KeyCombo, 256> map{};
-    for (auto& e : map) {
-        e = {};
-    }
-
-    // AzertyLayout uses:
-    // - shift: bit 0x02 or 0x20 (we use 0x02 for lookup)
-    // - altgr: bit 0x40
-    constexpr std::uint8_t kMods[] = {0x00, 0x02, 0x40, 0x42};
-
-    for (std::uint16_t code = 0; code < 128; ++code) {
-        for (const auto mods : kMods) {
-            const char out = AzertyLayout::mapKeyToAscii(static_cast<std::uint8_t>(code), mods);
-            if (out == 0) {
-                continue;
-            }
-
-            const auto idx = static_cast<unsigned char>(out);
-            if (!map[idx].valid) {
-                map[idx] = KeyCombo{static_cast<std::uint8_t>(code), mods, true};
-            }
-        }
-    }
-
-    return map;
-}
 
 void typeRawKey(std::uint8_t keycode, std::uint8_t mods) {
     const bool wantShift = (mods & 0x02) || (mods & 0x20);
@@ -71,31 +42,97 @@ void typeRawKey(std::uint8_t keycode, std::uint8_t mods) {
     }
 }
 
-bool typeChar(char c, const std::array<KeyCombo, 256>& reverseMap, std::size_t& typed, std::size_t& skipped) {
-    switch (c) {
+KeyCombo mapFrenchAzertyLetter(char lower) {
+    // USB HID usage codes correspond to key positions. A French AZERTY OS layout maps those
+    // usages to characters. For injection we must use the correct usage codes for AZERTY.
+    //
+    // Only a few letters differ from the "US QWERTY identity mapping":
+    // - a <-> q (usage 20 <-> 4)
+    // - z <-> w (usage 26 <-> 29)
+    // - m is on usage 51 (US ';' key). Usage 16 is ',' on FR.
+    switch (lower) {
+        case 'a': return KeyCombo{20, 0, true};  // US 'q' key
+        case 'q': return KeyCombo{4, 0, true};   // US 'a' key
+        case 'z': return KeyCombo{26, 0, true};  // US 'w' key
+        case 'w': return KeyCombo{29, 0, true};  // US 'z' key
+        case 'm': return KeyCombo{51, 0, true};  // US ';' key
+        default:
+            if (lower >= 'a' && lower <= 'z') {
+                const std::uint8_t code = static_cast<std::uint8_t>(4 + (lower - 'a'));
+                return KeyCombo{code, 0, true};
+            }
+            return KeyCombo{};
+    }
+}
+
+KeyCombo mapFrenchAzertyCodepoint(std::uint32_t cp) {
+    // Controls
+    switch (cp) {
         case '\n':
         case '\r':
-            typeRawKey(40, 0);  // Enter
-            ++typed;
-            return true;
+            return KeyCombo{40, 0, true};  // Enter
         case '\t':
-            typeRawKey(43, 0);  // Tab
-            ++typed;
-            return true;
+            return KeyCombo{43, 0, true};  // Tab
         case ' ':
-            typeRawKey(44, 0);  // Space
-            ++typed;
-            return true;
+            return KeyCombo{44, 0, true};  // Space
         case '\b':
-            typeRawKey(42, 0);  // Backspace
-            ++typed;
-            return true;
+            return KeyCombo{42, 0, true};  // Backspace
         default:
             break;
     }
 
-    const auto idx = static_cast<unsigned char>(c);
-    const auto combo = reverseMap[idx];
+    // ASCII letters
+    if (cp >= 'a' && cp <= 'z') {
+        return mapFrenchAzertyLetter(static_cast<char>(cp));
+    }
+    if (cp >= 'A' && cp <= 'Z') {
+        auto combo = mapFrenchAzertyLetter(static_cast<char>(cp - 'A' + 'a'));
+        combo.mods = static_cast<std::uint8_t>(combo.mods | 0x02);  // shift
+        return combo;
+    }
+
+    // Digits (French AZERTY: digits are shifted on the top row)
+    if (cp >= '1' && cp <= '9') {
+        const std::uint8_t code = static_cast<std::uint8_t>(30 + (cp - '1'));
+        return KeyCombo{code, 0x02, true};  // shift
+    }
+    if (cp == '0') {
+        return KeyCombo{39, 0x02, true};  // shift + '0' key
+    }
+
+    // Minimal punctuation (common in chat / phone keyboards)
+    switch (cp) {
+        case '\'':
+            return KeyCombo{33, 0, true};  // top row 4 key on FR yields apostrophe
+        case ',':
+            return KeyCombo{16, 0, true};  // FR: ',' on US 'm' key
+        case '.':
+            return KeyCombo{55, 0, true};  // common placement; may vary by OS settings
+        case '-':
+            return KeyCombo{35, 0, true};  // '-' on FR top row (no shift)
+        default:
+            break;
+    }
+
+    // Common French characters (UTF-8 codepoints).
+    switch (cp) {
+        case 0x00E9: return KeyCombo{31, 0, true};  // é
+        case 0x00E8: return KeyCombo{36, 0, true};  // è
+        case 0x00E0: return KeyCombo{39, 0, true};  // à
+        case 0x00E7: return KeyCombo{38, 0, true};  // ç
+        case 0x00F9: return KeyCombo{52, 0, true};  // ù
+        case 0x00A0: return KeyCombo{44, 0, true};  // non-breaking space -> space
+        case 0x2019: return KeyCombo{33, 0, true};  // ’ -> '
+        case 0x2018: return KeyCombo{33, 0, true};  // ‘ -> '
+        default:
+            break;
+    }
+
+    return KeyCombo{};
+}
+
+bool typeCodepoint(std::uint32_t cp, std::size_t& typed, std::size_t& skipped) {
+    const auto combo = mapFrenchAzertyCodepoint(cp);
     if (!combo.valid) {
         ++skipped;
         return false;
@@ -104,6 +141,81 @@ bool typeChar(char c, const std::array<KeyCombo, 256>& reverseMap, std::size_t& 
     typeRawKey(combo.keycode, combo.mods);
     ++typed;
     return true;
+}
+
+bool decodeUtf8One(const char* bytes, std::size_t len, std::uint32_t& outCp, std::size_t& outConsumed) {
+    if (bytes == nullptr || len == 0) {
+        return false;
+    }
+
+    const auto b0 = static_cast<std::uint8_t>(bytes[0]);
+    if (b0 < 0x80) {
+        outCp = b0;
+        outConsumed = 1;
+        return true;
+    }
+
+    auto isCont = [](std::uint8_t b) { return (b & 0xC0u) == 0x80u; };
+
+    if ((b0 & 0xE0u) == 0xC0u) {
+        if (len < 2) return false;
+        const auto b1 = static_cast<std::uint8_t>(bytes[1]);
+        if (!isCont(b1)) return false;
+        const std::uint32_t cp = ((b0 & 0x1Fu) << 6) | (b1 & 0x3Fu);
+        if (cp < 0x80u) return false;  // overlong
+        outCp = cp;
+        outConsumed = 2;
+        return true;
+    }
+
+    if ((b0 & 0xF0u) == 0xE0u) {
+        if (len < 3) return false;
+        const auto b1 = static_cast<std::uint8_t>(bytes[1]);
+        const auto b2 = static_cast<std::uint8_t>(bytes[2]);
+        if (!isCont(b1) || !isCont(b2)) return false;
+        const std::uint32_t cp = ((b0 & 0x0Fu) << 12) | ((b1 & 0x3Fu) << 6) | (b2 & 0x3Fu);
+        if (cp < 0x800u) return false;  // overlong
+        if (cp >= 0xD800u && cp <= 0xDFFFu) return false;  // surrogate range
+        outCp = cp;
+        outConsumed = 3;
+        return true;
+    }
+
+    if ((b0 & 0xF8u) == 0xF0u) {
+        if (len < 4) return false;
+        const auto b1 = static_cast<std::uint8_t>(bytes[1]);
+        const auto b2 = static_cast<std::uint8_t>(bytes[2]);
+        const auto b3 = static_cast<std::uint8_t>(bytes[3]);
+        if (!isCont(b1) || !isCont(b2) || !isCont(b3)) return false;
+        const std::uint32_t cp =
+            ((b0 & 0x07u) << 18) | ((b1 & 0x3Fu) << 12) | ((b2 & 0x3Fu) << 6) | (b3 & 0x3Fu);
+        if (cp < 0x10000u || cp > 0x10FFFFu) return false;
+        outCp = cp;
+        outConsumed = 4;
+        return true;
+    }
+
+    return false;
+}
+
+std::size_t utf8TruncateToWholeCodepoints(std::string_view text, std::size_t maxBytes) {
+    std::size_t i = 0;
+    const std::size_t limit = std::min<std::size_t>(text.size(), maxBytes);
+    while (i < limit) {
+        std::uint32_t cp = 0;
+        std::size_t consumed = 0;
+        const std::size_t remaining = limit - i;
+        if (!decodeUtf8One(text.data() + i, remaining, cp, consumed)) {
+            // Keep invalid bytes as-is (they'll be skipped during typing); just avoid infinite loops.
+            ++i;
+            continue;
+        }
+        if (i + consumed > limit) {
+            break;
+        }
+        i += consumed;
+    }
+    return i;
 }
 }  // namespace
 
@@ -128,7 +240,7 @@ bool HostKeyboard::enqueueTypeText(std::string_view text) {
     }
 
     auto& slot = queue_[queueTail_];
-    slot.len = std::min<std::size_t>(text.size(), kMaxTypeChars);
+    slot.len = utf8TruncateToWholeCodepoints(text, kMaxTypeChars);
     for (std::size_t i = 0; i < slot.len; ++i) {
         slot.text[i] = text[i];
     }
@@ -161,8 +273,6 @@ void HostKeyboard::tick() {
 }
 
 void HostKeyboard::typeNextChunk_(std::size_t maxChars) {
-    static const auto kReverse = buildAzertyReverseMap();
-
     Threads::Scope lock(mutex_);
     if (!active_ && queueCount_ > 0) {
         const auto& slot = queue_[queueHead_];
@@ -178,9 +288,19 @@ void HostKeyboard::typeNextChunk_(std::size_t maxChars) {
 
     const std::size_t remaining = (index_ < len_) ? (len_ - index_) : 0;
     const std::size_t todo = std::min<std::size_t>(remaining, maxChars);
-    for (std::size_t i = 0; i < todo; ++i) {
-        const char c = text_[index_++];
-        (void)typeChar(c, kReverse, typed_, skipped_);
+    std::size_t codepoints = 0;
+    while (codepoints < todo && index_ < len_) {
+        std::uint32_t cp = 0;
+        std::size_t consumed = 0;
+        const std::size_t bytesRemaining = len_ - index_;
+        if (!decodeUtf8One(text_.data() + index_, bytesRemaining, cp, consumed)) {
+            ++skipped_;
+            ++index_;
+            continue;
+        }
+        index_ += consumed;
+        (void)typeCodepoint(cp, typed_, skipped_);
+        ++codepoints;
     }
 
     if (index_ >= len_) {
@@ -197,7 +317,7 @@ void HostKeyboard::typeNextChunk_(std::size_t maxChars) {
 }
 
 void HostKeyboard::startJobLocked_(std::string_view text) {
-    len_ = std::min<std::size_t>(text.size(), kMaxTypeChars);
+    len_ = utf8TruncateToWholeCodepoints(text, kMaxTypeChars);
     for (std::size_t i = 0; i < len_; ++i) {
         text_[i] = text[i];
     }
