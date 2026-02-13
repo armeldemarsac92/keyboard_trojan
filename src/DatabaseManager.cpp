@@ -123,6 +123,29 @@ bool executeSqlTransaction(sqlite3* db, const std::vector<std::string>& statemen
     return true;
 }
 
+void configureEmbeddedPragmas(sqlite3* db) {
+    if (db == nullptr) {
+        return;
+    }
+
+    auto exec = [&](const char* sql) {
+        char* errMsg = nullptr;
+        const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK) {
+            Logger::instance().printf("[DB] PRAGMA failed rc=%d err=%s sql=%s\n",
+                                      rc,
+                                      errMsg ? errMsg : "<null>",
+                                      sql);
+            sqlite3_free(errMsg);
+        }
+    };
+
+    // Bound SQLite memory usage for large scans on embedded targets.
+    // Negative values are interpreted as KiB (not pages).
+    exec("PRAGMA cache_size=-128;");
+    exec("PRAGMA temp_store=FILE;");
+}
+
 std::string formatRowAsKeyValue(sqlite3_stmt* stmt) {
     if (stmt == nullptr) {
         return {};
@@ -298,6 +321,8 @@ DatabaseManager::DatabaseManager() {
     dbAvailable_ = (dbConnection != nullptr);
 
     if (dbAvailable_) {
+        configureEmbeddedPragmas(dbConnection);
+
         const bool inputsOk = createSQLTable(dbConnection, KeyboardConfig::Tables::Inputs);
         const bool mastersOk = createSQLTable(dbConnection, KeyboardConfig::Tables::RadioMasters);
         const bool logsOk = createSQLTable(dbConnection, KeyboardConfig::Tables::Logs);
@@ -426,7 +451,9 @@ void DatabaseManager::processQueue() {
 
     const bool ok = [&]() {
         Threads::Scope dbLock(dbMutex_);
-        return executeSqlTransaction(dbConnection, batchToSave);
+        const bool ok = executeSqlTransaction(dbConnection, batchToSave);
+        (void)sqlite3_db_release_memory(dbConnection);
+        return ok;
     }();
 
     if (!ok) {
@@ -470,6 +497,7 @@ bool DatabaseManager::countRows(const DBTable& table, std::uint32_t& outCount) {
     if (rc != SQLITE_OK) {
         Logger::instance().printf("[DB] COUNT prepare failed (%s): %s\n", table.tableName.c_str(),
                                   sqlite3_errmsg(dbConnection));
+        (void)sqlite3_db_release_memory(dbConnection);
         return false;
     }
 
@@ -483,10 +511,12 @@ bool DatabaseManager::countRows(const DBTable& table, std::uint32_t& outCount) {
         Logger::instance().printf("[DB] COUNT step failed (%s): rc=%d err=%s\n", table.tableName.c_str(), rc,
                                   sqlite3_errmsg(dbConnection));
         sqlite3_finalize(stmt);
+        (void)sqlite3_db_release_memory(dbConnection);
         return false;
     }
 
     sqlite3_finalize(stmt);
+    (void)sqlite3_db_release_memory(dbConnection);
     Logger::instance().printf("[DB][Q] COUNT %s => %u\n", table.tableName.c_str(), static_cast<unsigned>(outCount));
     return true;
 }
@@ -516,6 +546,7 @@ std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
                                       nullptr);
     if (rc != SQLITE_OK) {
         Logger::instance().printf("[DB] TAIL prepare failed (Inputs): %s\n", sqlite3_errmsg(dbConnection));
+        (void)sqlite3_db_release_memory(dbConnection);
         return lines;
     }
 
@@ -546,6 +577,7 @@ std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
     }
 
     sqlite3_finalize(stmt);
+    (void)sqlite3_db_release_memory(dbConnection);
     Logger::instance().printf("[DB][Q] TAIL Inputs returned=%u\n", static_cast<unsigned>(lines.size()));
     return lines;
 }
