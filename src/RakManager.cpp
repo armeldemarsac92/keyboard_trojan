@@ -1486,7 +1486,54 @@ void RakManager::begin() {
 void RakManager::onPrivatePayloadComplete(uint32_t from, uint8_t channel, const std::uint8_t* bytes, std::size_t len) {
     Logger::instance().printf("[RAK] PRIVATE_APP payload complete: from=%u channel=%u len=%u\n", from, channel,
                               static_cast<unsigned>(len));
-    (void)bytes;
+
+    if (bytes == nullptr || len == 0) {
+        return;
+    }
+
+    constexpr std::size_t kMaxPrivateCommandBytes = 512;
+    if (len > kMaxPrivateCommandBytes) {
+        Logger::instance().printf("[RAK] PRIVATE_APP payload ignored: too large (%u > %u)\n",
+                                  static_cast<unsigned>(len),
+                                  static_cast<unsigned>(kMaxPrivateCommandBytes));
+        return;
+    }
+
+    std::string text;
+    text.reserve(len);
+    for (std::size_t i = 0; i < len; ++i) {
+        const char c = static_cast<char>(bytes[i]);
+        if (c == '\0') {
+            break;
+        }
+
+        const auto uc = static_cast<unsigned char>(c);
+        const bool isControl = (uc < 0x20u) && c != '\n' && c != '\r' && c != '\t';
+        if (isControl) {
+            Logger::instance().printf("[RAK] PRIVATE_APP payload ignored: non-text byte 0x%02X at index=%u\n",
+                                      static_cast<unsigned>(uc),
+                                      static_cast<unsigned>(i));
+            return;
+        }
+
+        text.push_back(c);
+    }
+
+    const std::string_view message = trim(text);
+    if (message.empty()) {
+        return;
+    }
+
+    std::string normalized(message);
+    auto& instance = RakManager::getInstance();
+
+    if (my_node_num != 0U) {
+        RakManager::onTextMessage(from, my_node_num, channel, normalized.c_str());
+        return;
+    }
+
+    // Fallback before node id is known: queue known command handlers directly.
+    instance.enqueueCommand(from, 0U, channel, normalized.c_str());
 }
 
 void RakManager::listenerThread(void* arg) {

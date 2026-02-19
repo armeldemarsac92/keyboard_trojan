@@ -3,6 +3,9 @@
 
 #include <Arduino.h>
 #include <TeensyThreads.h>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
 
 class NlpManager {
 public:
@@ -19,7 +22,7 @@ public:
     void debugPrediction(String text); // New: detailed prediction debug
 
 private:
-    NlpManager() : _hasNewData(false), _callback(nullptr) {}
+    NlpManager() : _droppedInputs(0), _callback(nullptr) {}
     NlpManager(const NlpManager&) = delete;
     NlpManager& operator=(const NlpManager&) = delete;
 
@@ -36,8 +39,9 @@ private:
 
     // Thread synchronization
     Threads::Mutex _mutex;
-    volatile bool _hasNewData;
-    String _inputBuffer;
+    std::deque<String> _pendingInputs;
+    std::uint16_t _droppedInputs;
+    static constexpr std::size_t kMaxPendingInputs = 8;
     void (*_callback)(String topic, float confidence);
 };
 

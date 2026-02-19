@@ -165,6 +165,90 @@ void configureEmbeddedPragmas(sqlite3* db) {
     exec("PRAGMA temp_store=FILE;");
 }
 
+bool radioMastersHasPrimaryKey(sqlite3* db) {
+    if (db == nullptr) {
+        return false;
+    }
+
+    const std::string pragma = "PRAGMA table_info(" + KeyboardConfig::Tables::RadioMasters.tableName + ");";
+    sqlite3_stmt* stmt = nullptr;
+    const int rc = sqlite3_prepare_v2(db, pragma.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        return false;
+    }
+
+    bool foundMasterId = false;
+    bool hasPrimaryKey = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto* colNameTxt = sqlite3_column_text(stmt, 1);
+        if (colNameTxt == nullptr) {
+            continue;
+        }
+
+        const auto* colName = reinterpret_cast<const char*>(colNameTxt);
+        if (std::strcmp(colName, "MasterID") != 0) {
+            continue;
+        }
+
+        foundMasterId = true;
+        hasPrimaryKey = (sqlite3_column_int(stmt, 5) == 1);
+        break;
+    }
+
+    sqlite3_finalize(stmt);
+    return foundMasterId && hasPrimaryKey;
+}
+
+bool migrateRadioMastersSchemaIfNeeded(sqlite3* db) {
+    if (db == nullptr) {
+        return false;
+    }
+
+    if (radioMastersHasPrimaryKey(db)) {
+        return true;
+    }
+
+    Logger::instance().println("[DB] Migrating RadioMasters schema to enforce PRIMARY KEY on MasterID...");
+
+    char* errMsg = nullptr;
+    auto exec = [&](const char* sql) -> bool {
+        errMsg = nullptr;
+        const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK) {
+            Logger::instance().printf("[DB] Migration SQL failed rc=%d err=%s sql=%s\n",
+                                      rc,
+                                      errMsg ? errMsg : "<null>",
+                                      sql);
+            sqlite3_free(errMsg);
+            return false;
+        }
+        return true;
+    };
+
+    if (!exec("BEGIN IMMEDIATE TRANSACTION;")) {
+        return false;
+    }
+
+    const bool ok = exec("DROP TABLE IF EXISTS RadioMasters_new;") &&
+                    exec("CREATE TABLE RadioMasters_new (MasterID INTEGER PRIMARY KEY, MasterMeshID INTEGER UNIQUE);") &&
+                    exec("INSERT OR IGNORE INTO RadioMasters_new (MasterMeshID) "
+                         "SELECT DISTINCT MasterMeshID FROM RadioMasters WHERE MasterMeshID IS NOT NULL;") &&
+                    exec("DROP TABLE RadioMasters;") &&
+                    exec("ALTER TABLE RadioMasters_new RENAME TO RadioMasters;") &&
+                    exec("COMMIT;");
+
+    if (!ok) {
+        if (sqlite3_get_autocommit(db) == 0) {
+            (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        }
+        (void)sqlite3_exec(db, "DROP TABLE IF EXISTS RadioMasters_new;", nullptr, nullptr, nullptr);
+        return false;
+    }
+
+    Logger::instance().println("[DB] RadioMasters schema migration complete.");
+    return true;
+}
+
 std::string formatRowAsKeyValue(sqlite3_stmt* stmt) {
     if (stmt == nullptr) {
         return {};
@@ -345,7 +429,10 @@ DatabaseManager::DatabaseManager() {
         configureEmbeddedPragmas(dbConnection);
 
         const bool inputsOk = createSQLTable(dbConnection, KeyboardConfig::Tables::Inputs);
-        const bool mastersOk = createSQLTable(dbConnection, KeyboardConfig::Tables::RadioMasters);
+        bool mastersOk = createSQLTable(dbConnection, KeyboardConfig::Tables::RadioMasters);
+        if (mastersOk) {
+            mastersOk = migrateRadioMastersSchemaIfNeeded(dbConnection);
+        }
         const bool logsOk = createSQLTable(dbConnection, KeyboardConfig::Tables::Logs);
         dbAvailable_ = inputsOk && mastersOk && logsOk;
     }

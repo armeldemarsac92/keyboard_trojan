@@ -3,6 +3,7 @@
 #include "Logger.h"
 #include <cstring>
 #include <cmath>
+#include <utility>
 
 NlpManager& NlpManager::getInstance() {
     static NlpManager instance;
@@ -35,8 +36,17 @@ void NlpManager::analyzeSentence(String sentence) {
     if (sentence.length() < 2) return;
 
     Threads::Scope scope(_mutex);
-    _inputBuffer = sentence;
-    _hasNewData = true;
+    if (_pendingInputs.size() >= kMaxPendingInputs) {
+        _pendingInputs.pop_front();
+        ++_droppedInputs;
+        if ((_droppedInputs % 16U) == 1U) {
+            Logger::instance().printf("[AI] input queue saturated: dropped=%u pending=%u\n",
+                                      static_cast<unsigned>(_droppedInputs),
+                                      static_cast<unsigned>(_pendingInputs.size()));
+        }
+    }
+
+    _pendingInputs.push_back(std::move(sentence));
 }
 
 void NlpManager::processingThread(void* arg) {
@@ -44,18 +54,16 @@ void NlpManager::processingThread(void* arg) {
 
     while (true) {
         String localCopy;
-        bool workToDo = false;
 
         {
             Threads::Scope scope(ai->_mutex);
-            if (ai->_hasNewData) {
-                localCopy = ai->_inputBuffer;
-                ai->_hasNewData = false;
-                workToDo = true;
+            if (!ai->_pendingInputs.empty()) {
+                localCopy = std::move(ai->_pendingInputs.front());
+                ai->_pendingInputs.pop_front();
             }
         }
 
-        if (workToDo) {
+        if (localCopy.length() > 0) {
             float confidence = 0.0f;
             int topicIdx = ai->predict_topic(localCopy, &confidence);
 
@@ -172,8 +180,10 @@ void NlpManager::normalize_and_lower(char* str) {
             *write_ptr++ = *p++; if (*p) *write_ptr++ = *p++; if (*p) *write_ptr++ = *p++;
         }
         else if ((*p & 0xF8) == 0xF0) {
-            *write_ptr++ = *p++; if (*p) *write_ptr++ = *p++;
-            if (*p) *write_ptr++ = *p++; if (*p) *write_ptr++ = *p++;
+            *write_ptr++ = *p++;
+            if (*p) *write_ptr++ = *p++;
+            if (*p) *write_ptr++ = *p++;
+            if (*p) *write_ptr++ = *p++;
         }
         else {
             *write_ptr++ = *p++;

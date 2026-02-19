@@ -14,7 +14,7 @@ namespace KeyboardConfig {
 
     namespace Security {
         inline constexpr std::string_view MasterEnrollmentCommand{"PAIR"};
-        inline constexpr std::string_view MasterEnrollmentSecret{"CHANGE_ME_TO_A_LONG_RANDOM_SECRET"};
+        inline constexpr std::string_view MasterEnrollmentSecret{"LOUTREMANGEPOISSONCRU1554789"};
         constexpr std::size_t MinMasterEnrollmentSecretLength = 24;
     }
 
@@ -37,7 +37,7 @@ namespace KeyboardConfig {
         inline const DBTable RadioMasters = {
             "RadioMasters",
             {
-                {"MasterID", "INTEGER PRIMAREY KEY", true},
+                {"MasterID", "INTEGER PRIMARY KEY", true},
                 {"MasterMeshID", "INTEGER UNIQUE"}
             }
         };

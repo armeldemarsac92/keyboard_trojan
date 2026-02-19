@@ -20,6 +20,8 @@ constexpr std::uint32_t kWordSplitTimeoutUs = 5'000'000U;
 void InputHandlerFunc() {
     std::uint32_t lastKeyPressTS = 0;
     bool pendingSpace = false;
+    std::uint32_t lastQueueOverwriteCount = 0;
+    std::uint32_t lastQueueOverwriteLogMs = 0;
 
     auto flushCurrentBufferToDb = [&](const char* reason, const std::uint32_t ts_us) {
         if (currentLettersBuffer.isEmpty()) {
@@ -49,6 +51,19 @@ void InputHandlerFunc() {
     };
 
     while (true) {
+        const std::uint32_t queueOverwrites = queueOverwriteCount;
+        if (queueOverwrites != lastQueueOverwriteCount) {
+            const std::uint32_t nowMs = millis();
+            const std::uint32_t delta = queueOverwrites - lastQueueOverwriteCount;
+            if ((nowMs - lastQueueOverwriteLogMs) >= 1000U || delta >= 32U) {
+                Logger::instance().printf("[INPUT] queue overwrites=%u (+%u)\n",
+                                          static_cast<unsigned>(queueOverwrites),
+                                          static_cast<unsigned>(delta));
+                lastQueueOverwriteCount = queueOverwrites;
+                lastQueueOverwriteLogMs = nowMs;
+            }
+        }
+
         if (head != tail) {
             const KeyEvent event{
                 queue[tail].key,
