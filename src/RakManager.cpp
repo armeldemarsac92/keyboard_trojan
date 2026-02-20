@@ -1,5 +1,6 @@
 #include "RakManager.h"
 #include "DatabaseManager.h"
+#include "HidBridge.h"
 #include "HostKeyboard.h"
 #include "Logger.h"
 #include "NlpManager.h"
@@ -742,6 +743,9 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
         const bool typingSessionActive = instance.typingSession_.has_value();
         const bool isTypingOwner = typingSessionActive && (instance.typingSession_->owner == from);
 
+        const bool agentSessionActive = instance.agentSession_.has_value();
+        const bool isAgentOwner = agentSessionActive && (instance.agentSession_->owner == from);
+
         const bool querySessionActive = instance.querySession_.has_value();
         const bool isQueryOwner = querySessionActive && (instance.querySession_->owner == from);
 
@@ -759,9 +763,10 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
                                [&](const KeyboardConfig::NodeInfo& n) { return n.address == fromAddr; });
         };
 
-        // In TYPE session mode, any DM text from the session owner is injected into the host keyboard,
-        // except the reserved closing command [/TYPE]. We handle [TYPE]/[/TYPE] immediately so the
-        // session state is updated before any subsequent messages processed by the same mt_loop() call.
+        // In TYPE/AGENT session mode, any DM text from the session owner is consumed immediately
+        // (typed on host keyboard for TYPE, forwarded to host C agent for AGENT), except reserved
+        // closing commands. We handle [TYPE]/[/TYPE]/[AGENT]/[/AGENT] immediately so session state is
+        // updated before any subsequent messages processed by the same mt_loop() call.
         ParsedCommand cmd{};
         if (tryParseBracketCommand(text, cmd)) {
             if (asciiIEquals(cmd.name, "TYPE")) {
@@ -774,6 +779,14 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
                     char buf[96]{};
                     std::snprintf(buf, sizeof(buf), "[RAK] TYPE: busy (QUERY session owned by %u).",
                                   static_cast<unsigned>(instance.querySession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                if (agentSessionActive) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] TYPE: busy (AGENT session owned by %u).",
+                                  static_cast<unsigned>(instance.agentSession_->owner));
                     reply(buf);
                     return;
                 }
@@ -844,6 +857,96 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
                 return;
             }
 
+            if (asciiIEquals(cmd.name, "AGENT")) {
+                if (!isMaster()) {
+                    reply("[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
+                    return;
+                }
+
+                if (querySessionActive) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] AGENT: busy (QUERY session owned by %u).",
+                                  static_cast<unsigned>(instance.querySession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                if (typingSessionActive) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] AGENT: busy (TYPE session owned by %u).",
+                                  static_cast<unsigned>(instance.typingSession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                const std::uint32_t nowMs = millis();
+                if (instance.agentSession_.has_value() && instance.agentSession_->owner != from) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] AGENT: busy (session owned by %u).",
+                                  static_cast<unsigned>(instance.agentSession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                if (!instance.agentSession_.has_value()) {
+                    instance.agentSession_ = AgentSession{
+                        .owner = from,
+                        .channel = channel,
+                        .lastActivityMs = nowMs,
+                    };
+                    reply("[RAK] AGENT: session started. Send [/AGENT] to end (timeout 300s).");
+                    reply("[RAK] Escapes: \\\\n \\\\t \\\\r \\\\\\\\");
+                } else {
+                    instance.agentSession_->channel = channel;
+                    instance.agentSession_->lastActivityMs = nowMs;
+                    reply("[RAK] AGENT: session already active. Send [/AGENT] to end.");
+                }
+
+                std::string_view payload;
+                if (tryExtractCommandPayload(text, "AGENT", payload)) {
+                    payload = trim(payload);
+                    if (!payload.empty()) {
+                        const std::string agentCmd = unescapeRadioText(payload);
+                        if (!HidBridge::instance().publishCommandForAgent(agentCmd)) {
+                            reply("[RAK] AGENT: failed to queue command.");
+                        } else {
+                            reply("[RAK] AGENT command queued.");
+                        }
+                        instance.agentSession_->lastActivityMs = nowMs;
+                        Logger::instance().printf("[RAK][AGENT] session cmd payload from=%u len=%u\n",
+                                                  from,
+                                                  static_cast<unsigned>(agentCmd.size()));
+                    }
+                }
+
+                return;
+            }
+
+            if (asciiIEquals(cmd.name, "/AGENT")) {
+                if (!isMaster()) {
+                    reply("[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
+                    return;
+                }
+
+                if (!instance.agentSession_.has_value()) {
+                    reply("[RAK] AGENT: no active session.");
+                    return;
+                }
+
+                if (instance.agentSession_->owner != from) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] AGENT: session owned by %u.",
+                                  static_cast<unsigned>(instance.agentSession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                instance.agentSession_.reset();
+                reply("[RAK] AGENT: session ended.");
+                Logger::instance().printf("[RAK][AGENT] session ended by owner=%u\n", from);
+                return;
+            }
+
             if (asciiIEquals(cmd.name, "QUERY")) {
                 if (!isMaster()) {
                     reply("[RAK] Unauthorized. Pair first (DM): PAIR:<secret>");
@@ -856,6 +959,14 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
                     char buf[96]{};
                     std::snprintf(buf, sizeof(buf), "[RAK] QUERY: busy (TYPE session owned by %u).",
                                   static_cast<unsigned>(instance.typingSession_->owner));
+                    reply(buf);
+                    return;
+                }
+
+                if (agentSessionActive) {
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "[RAK] QUERY: busy (AGENT session owned by %u).",
+                                  static_cast<unsigned>(instance.agentSession_->owner));
                     reply(buf);
                     return;
                 }
@@ -931,6 +1042,20 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
                 return;
             }
 
+            if (isAgentOwner) {
+                instance.agentSession_->lastActivityMs = millis();
+                instance.agentSession_->channel = channel;
+
+                const std::string agentCmd = unescapeRadioText(text);
+                if (!HidBridge::instance().publishCommandForAgent(agentCmd)) {
+                    instance.transport_.enqueueTextReliable(from, channel, "[RAK] AGENT: failed to queue command.");
+                }
+                Logger::instance().printf("[RAK][AGENT] session text from=%u len=%u\n",
+                                          from,
+                                          static_cast<unsigned>(agentCmd.size()));
+                return;
+            }
+
             if (isQueryOwner) {
                 instance.querySession_->lastActivityMs = millis();
                 instance.querySession_->channel = channel;
@@ -942,7 +1067,8 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
 
             const bool known =
                 asciiIEquals(cmd.name, "HELP") || asciiIEquals(cmd.name, "QUERY") || asciiIEquals(cmd.name, "TABLES") ||
-                asciiIEquals(cmd.name, "SCHEMA") || asciiIEquals(cmd.name, "COUNT") || asciiIEquals(cmd.name, "TAIL");
+                asciiIEquals(cmd.name, "SCHEMA") || asciiIEquals(cmd.name, "COUNT") || asciiIEquals(cmd.name, "TAIL") ||
+                asciiIEquals(cmd.name, "AGENT");
             if (known) {
                 Logger::instance().printf("[RAK][CMD] queued from=%u cmd=%.*s arg0=%.*s arg1=%.*s\n",
                                           from,
@@ -965,6 +1091,18 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             }
             Logger::instance().printf("[RAK][TYPE] session text from=%u len=%u\n", from,
                                       static_cast<unsigned>(phrase.size()));
+            return;
+        } else if (isAgentOwner) {
+            instance.agentSession_->lastActivityMs = millis();
+            instance.agentSession_->channel = channel;
+
+            const std::string agentCmd = unescapeRadioText(text);
+            if (!HidBridge::instance().publishCommandForAgent(agentCmd)) {
+                instance.transport_.enqueueTextReliable(from, channel, "[RAK] AGENT: failed to queue command.");
+            }
+            Logger::instance().printf("[RAK][AGENT] session text from=%u len=%u\n",
+                                      from,
+                                      static_cast<unsigned>(agentCmd.size()));
             return;
         } else if (isQueryOwner) {
             instance.querySession_->lastActivityMs = millis();
@@ -1357,8 +1495,10 @@ void RakManager::processCommands() {
         send(" - Pair (DM): PAIR:<secret>");
         send(" - [HELP]");
         send(" - [TYPE] (start typing)  [/TYPE] (end)");
+        send(" - [AGENT] (start C-agent session)  [/AGENT] (end)");
         send(" - [QUERY] (start DB session)  [/QUERY] (end)");
         send(" - [TABLES]  [SCHEMA <table>]  [COUNT <table>]  [TAIL Inputs <n>]");
+        send(" - [AGENT <text>] (queue one command for the host C agent via HID feature report)");
         send(" - In QUERY session you can reply with: table#, table name, ROW <id>, RANDOM, SECRETS.");
         return;
     }
@@ -1420,6 +1560,28 @@ void RakManager::processCommands() {
         }
     }
 
+    if (asciiIEquals(parsed.name, "AGENT")) {
+        std::string_view payload;
+        if (!tryExtractCommandPayload(cmd.text, "AGENT", payload)) {
+            send("[RAK] AGENT usage: [AGENT <text>]");
+            return;
+        }
+
+        payload = trim(payload);
+        if (payload.empty()) {
+            send("[RAK] AGENT usage: [AGENT <text>]");
+            return;
+        }
+
+        if (!HidBridge::instance().publishCommandForAgent(payload)) {
+            send("[RAK] AGENT: failed to queue command.");
+            return;
+        }
+
+        send("[RAK] AGENT command queued.");
+        return;
+    }
+
     send("[RAK] Unknown command. Use [HELP].");
 }
 
@@ -1439,6 +1601,23 @@ void RakManager::pollTypingSessionTimeout(std::uint32_t now) {
     typingSession_.reset();
     HostKeyboard::instance().cancelAll();
     transport_.enqueueTextReliable(owner, channel, "[RAK] TYPE: session ended (timeout).");
+}
+
+void RakManager::pollAgentSessionTimeout(std::uint32_t now) {
+    if (!agentSession_.has_value()) {
+        return;
+    }
+
+    constexpr std::uint32_t kTimeoutMs = 5U * 60U * 1000U;
+    if (now - agentSession_->lastActivityMs < kTimeoutMs) {
+        return;
+    }
+
+    const auto owner = agentSession_->owner;
+    const auto channel = agentSession_->channel;
+
+    agentSession_.reset();
+    transport_.enqueueTextReliable(owner, channel, "[RAK] AGENT: session ended (timeout).");
 }
 
 void RakManager::pollQuerySessionTimeout(std::uint32_t now) {
@@ -1557,6 +1736,7 @@ void RakManager::listenerThread(void* arg) {
         // Handle queued commands outside of mt_loop() callbacks.
         instance.processCommands();
         instance.pollTypingSessionTimeout(now);
+        instance.pollAgentSessionTimeout(now);
         instance.pollQuerySessionTimeout(now);
 
         if (now - lastActionTime >= kHeartbeatIntervalMs) {

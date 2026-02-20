@@ -38,6 +38,7 @@ public:
     static void onPrivatePayloadComplete(uint32_t from, uint8_t channel, const std::uint8_t* bytes, std::size_t len);
     void processCommands();
     void pollTypingSessionTimeout(std::uint32_t now);
+    void pollAgentSessionTimeout(std::uint32_t now);
     void pollQuerySessionTimeout(std::uint32_t now);
     void enqueueCommand(uint32_t from, uint32_t to, uint8_t channel, const char* text);
 
@@ -58,6 +59,14 @@ public:
     };
 
     std::optional<TypingSession> typingSession_{};
+
+    struct AgentSession {
+        uint32_t owner = 0;
+        uint8_t channel = 0;
+        std::uint32_t lastActivityMs = 0;
+    };
+
+    std::optional<AgentSession> agentSession_{};
 
     struct QuerySession {
         uint32_t owner = 0;

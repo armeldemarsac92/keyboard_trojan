@@ -1,12 +1,14 @@
 #include <Arduino.h>
 #include <TeensyThreads.h>
 #include <cstdint>
+#include <string>
 
 #include "DataHelpers.h"
 #include "DatabaseManager.h"
 #include "KeyHelper.h"
 #include "LettersBuffer.h"
 #include "Logger.h"
+#include "HidBridge.h"
 #include "Queuing.h"
 #include "StatsBuffer.h"
 #include "../config/KeyboardConfig.h"
@@ -42,8 +44,9 @@ void InputHandlerFunc() {
                                   word.c_str(),
                                   truncated ? "..." : "");
 
+        const std::string activeWindow = HidBridge::instance().activeWindowSnapshot();
         DatabaseManager::getInstance().saveData(
-            DataHelpers::stringifyInputData(currentLettersBuffer, ts_us, timeDeltaBetweenKeysBuffer),
+            DataHelpers::stringifyInputData(currentLettersBuffer, ts_us, timeDeltaBetweenKeysBuffer, activeWindow),
             KeyboardConfig::Tables::Inputs
         );
         currentLettersBuffer.clear();

@@ -30,7 +30,8 @@ namespace KeyboardConfig {
                 {"Timestamp", "REAL"},
                 {"Variance", "REAL"},
                 {"AvgDelayBetweenStrokes", "REAL"},
-                {"Entropy", "REAL"}
+                {"Entropy", "REAL"},
+                {"ActiveWindow", "TEXT"}
             }
         };
 

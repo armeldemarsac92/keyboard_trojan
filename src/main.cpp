@@ -7,6 +7,7 @@
 #include "Globals.h"
 #include "DatabaseManager.h"
 #include "HostKeyboard.h"
+#include "HidBridge.h"
 #include "InputHandler.h"
 #include "KeyHandlers.h"
 #include "Logger.h"
@@ -67,30 +68,11 @@ void setup() {
 
 void loop() {
   if (custom_feature_data_ready) {
-    constexpr std::uint16_t kFeatureReportWithIdLen = 65;
-    constexpr std::uint8_t kCommandA = 0x41;
-
     digitalWrite(13, HIGH);
+    const std::uint16_t receivedLen = custom_feature_len_received;
     custom_feature_data_ready = 0;
-
-    // --- SMART OFFSET DETECTION ---
-    // If we got 65 bytes, Windows put the Report ID at [0]. Data starts at [1].
-    // If we got 64 bytes, Data starts at [0].
-    const int dataOffset = (custom_feature_len_received == kFeatureReportWithIdLen) ? 1 : 0;
-
-    // Check the data at the calculated offset
-    if (custom_feature_buffer[dataOffset] == kCommandA) {
-      Keyboard.println("PC Command A: Triggered!");
-    }
-
-    // Debugging: Print exactly what we received
-    /*
-    Logger::instance().print("Len: "); Logger::instance().println(custom_feature_len_received);
-    Logger::instance().print("Byte[0]: "); Logger::instance().println(custom_feature_buffer[0], HEX);
-    Logger::instance().print("Byte[1]: "); Logger::instance().println(custom_feature_buffer[1], HEX);
-    */
-
-    delay(10);
+    HidBridge::instance().processFeatureReport(custom_feature_buffer, receivedLen);
+    delay(1);
     digitalWrite(13, LOW);
   }
 

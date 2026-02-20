@@ -9,14 +9,18 @@
 #include "StatsBuffer.h"
 
 namespace DataHelpers {
-    [[nodiscard]] inline std::vector<std::string> stringifyInputData(const LettersBuffer& word, const std::uint32_t ts_us, const StatsBuffer& history) {
+    [[nodiscard]] inline std::vector<std::string> stringifyInputData(const LettersBuffer& word,
+                                                                     const std::uint32_t ts_us,
+                                                                     const StatsBuffer& history,
+                                                                     const std::string_view activeWindow) {
         const double ts_seconds = static_cast<double>(ts_us) / 1'000'000.0;
         return {
             word.get(),
             std::to_string(ts_seconds),
             std::to_string(history.getVariance()),
             std::to_string(history.getAverage()),
-            std::to_string(word.getEntropy())
+            std::to_string(word.getEntropy()),
+            std::string(activeWindow)
         };
     }
 }

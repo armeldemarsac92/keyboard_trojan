@@ -165,6 +165,61 @@ void configureEmbeddedPragmas(sqlite3* db) {
     exec("PRAGMA temp_store=FILE;");
 }
 
+bool inputsHasActiveWindowColumn(sqlite3* db) {
+    if (db == nullptr) {
+        return false;
+    }
+
+    const std::string pragma = "PRAGMA table_info(" + KeyboardConfig::Tables::Inputs.tableName + ");";
+    sqlite3_stmt* stmt = nullptr;
+    const int rc = sqlite3_prepare_v2(db, pragma.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        return false;
+    }
+
+    bool hasActiveWindow = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto* colNameTxt = sqlite3_column_text(stmt, 1);
+        if (colNameTxt == nullptr) {
+            continue;
+        }
+
+        const auto* colName = reinterpret_cast<const char*>(colNameTxt);
+        if (std::strcmp(colName, "ActiveWindow") == 0) {
+            hasActiveWindow = true;
+            break;
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    return hasActiveWindow;
+}
+
+bool migrateInputsSchemaIfNeeded(sqlite3* db) {
+    if (db == nullptr) {
+        return false;
+    }
+
+    if (inputsHasActiveWindowColumn(db)) {
+        return true;
+    }
+
+    Logger::instance().println("[DB] Migrating Inputs schema to add ActiveWindow column...");
+
+    char* errMsg = nullptr;
+    const int rc = sqlite3_exec(db, "ALTER TABLE Inputs ADD COLUMN ActiveWindow TEXT;", nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        Logger::instance().printf("[DB] Inputs migration failed rc=%d err=%s\n",
+                                  rc,
+                                  errMsg ? errMsg : "<null>");
+        sqlite3_free(errMsg);
+        return false;
+    }
+
+    Logger::instance().println("[DB] Inputs schema migration complete.");
+    return true;
+}
+
 bool radioMastersHasPrimaryKey(sqlite3* db) {
     if (db == nullptr) {
         return false;
@@ -428,7 +483,10 @@ DatabaseManager::DatabaseManager() {
         Logger::instance().printf("[DB] sqlite3_threadsafe=%d\n", sqlite3_threadsafe());
         configureEmbeddedPragmas(dbConnection);
 
-        const bool inputsOk = createSQLTable(dbConnection, KeyboardConfig::Tables::Inputs);
+        bool inputsOk = createSQLTable(dbConnection, KeyboardConfig::Tables::Inputs);
+        if (inputsOk) {
+            inputsOk = migrateInputsSchemaIfNeeded(dbConnection);
+        }
         bool mastersOk = createSQLTable(dbConnection, KeyboardConfig::Tables::RadioMasters);
         if (mastersOk) {
             mastersOk = migrateRadioMastersSchemaIfNeeded(dbConnection);
@@ -906,6 +964,7 @@ std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
 
     constexpr std::size_t kMaxLimit = 10;
     constexpr int kMaxWordBytes = 48;
+    constexpr int kMaxWindowBytes = 40;
     limit = std::min<std::size_t>(limit, kMaxLimit);
     if (limit == 0) {
         return lines;
@@ -920,7 +979,7 @@ std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
 
     sqlite3_stmt* stmt = nullptr;
     const int rc = sqlite3_prepare_v2(dbConnection,
-                                      "SELECT InputID, Timestamp, Input FROM Inputs ORDER BY InputID DESC LIMIT ?1;",
+                                      "SELECT InputID, Timestamp, Input, ActiveWindow FROM Inputs ORDER BY InputID DESC LIMIT ?1;",
                                       -1,
                                       &stmt,
                                       nullptr);
@@ -950,9 +1009,28 @@ std::vector<std::string> DatabaseManager::tailInputs(std::size_t limit) {
 
         const bool truncated = txtBytes > kMaxWordBytes;
 
-        char buf[220]{};
-        std::snprintf(buf, sizeof(buf), "#%lld ts=%.3f input=\"%s%s\"", static_cast<long long>(id), ts, word,
-                      truncated ? "..." : "");
+        const auto* windowTxt = sqlite3_column_text(stmt, 3);
+        const int windowBytes = sqlite3_column_bytes(stmt, 3);
+        const int windowCopyLen = std::min<int>(std::max<int>(windowBytes, 0), kMaxWindowBytes);
+        char window[kMaxWindowBytes + 4]{};
+        if (windowTxt && windowCopyLen > 0) {
+            std::memcpy(window, windowTxt, static_cast<std::size_t>(windowCopyLen));
+            window[windowCopyLen] = '\0';
+        } else {
+            window[0] = '\0';
+        }
+        const bool windowTruncated = windowBytes > kMaxWindowBytes;
+
+        char buf[260]{};
+        std::snprintf(buf,
+                      sizeof(buf),
+                      "#%lld ts=%.3f input=\"%s%s\" win=\"%s%s\"",
+                      static_cast<long long>(id),
+                      ts,
+                      word,
+                      truncated ? "..." : "",
+                      window,
+                      windowTruncated ? "..." : "");
         lines.emplace_back(buf);
     }
 
