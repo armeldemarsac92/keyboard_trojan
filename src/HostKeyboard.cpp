@@ -1,5 +1,7 @@
 #include "HostKeyboard.h"
 
+#include <Arduino.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -11,6 +13,11 @@
 
 namespace {
 constexpr std::uint16_t kRawKeycodePrefix = 0xF000;
+constexpr std::uint8_t kRawKeyR = 21;  // HID usage for 'r' key.
+constexpr std::uint8_t kRawKeyT = 23;  // HID usage for 't' key.
+constexpr std::uint32_t kShortcutFocusDelayMs = 420U;
+constexpr std::uint32_t kCommandInterKeyDelayMs = 14U;
+constexpr std::uint32_t kCommandEnterDelayMs = 30U;
 
 struct KeyCombo {
     std::uint8_t keycode = 0;
@@ -40,6 +47,25 @@ void typeRawKey(std::uint8_t keycode, std::uint8_t mods) {
     if (wantShift) {
         Keyboard.release(MODIFIERKEY_LEFT_SHIFT);
     }
+}
+
+void pressWindowsRunShortcut() {
+    Keyboard.press(KEY_LEFT_GUI);
+    typeRawKey(kRawKeyR, 0);
+    Keyboard.release(KEY_LEFT_GUI);
+}
+
+void pressLinuxTerminalShortcut() {
+    Keyboard.press(MODIFIERKEY_LEFT_CTRL);
+    Keyboard.press(MODIFIERKEY_LEFT_ALT);
+    typeRawKey(kRawKeyT, 0);
+    Keyboard.release(MODIFIERKEY_LEFT_ALT);
+    Keyboard.release(MODIFIERKEY_LEFT_CTRL);
+}
+
+void pressEnterKey() {
+    Keyboard.press(KEY_ENTER);
+    Keyboard.release(KEY_ENTER);
 }
 
 KeyCombo mapFrenchAzertyLetter(char lower) {
@@ -100,14 +126,22 @@ KeyCombo mapFrenchAzertyCodepoint(std::uint32_t cp) {
         return KeyCombo{39, 0x02, true};  // shift + '0' key
     }
 
-    // Minimal punctuation (common in chat / phone keyboards)
+    // Minimal punctuation for URLs/commands on French AZERTY.
     switch (cp) {
         case '\'':
             return KeyCombo{33, 0, true};  // top row 4 key on FR yields apostrophe
         case ',':
-            return KeyCombo{16, 0, true};  // FR: ',' on US 'm' key
+            return KeyCombo{16, 0, true};   // 'm' physical key on FR yields comma
         case '.':
-            return KeyCombo{55, 0, true};  // common placement; may vary by OS settings
+            return KeyCombo{54, 0x02, true}; // Shift + ',' key
+        case '/':
+            return KeyCombo{55, 0x02, true}; // Shift + ';' key
+        case ';':
+            return KeyCombo{54, 0, true};    // ';' key
+        case ':':
+            return KeyCombo{55, 0, true};    // ':' key
+        case '?':
+            return KeyCombo{16, 0x02, true}; // Shift + ',' key
         case '-':
             return KeyCombo{35, 0, true};  // '-' on FR top row (no shift)
         default:
@@ -231,7 +265,7 @@ bool HostKeyboard::enqueueTypeText(std::string_view text) {
 
     Threads::Scope lock(mutex_);
     if (!active_) {
-        startJobLocked_(text);
+        startJobLocked_(text, LaunchShortcut::None, false);
         return true;
     }
 
@@ -245,6 +279,51 @@ bool HostKeyboard::enqueueTypeText(std::string_view text) {
         slot.text[i] = text[i];
     }
     slot.text[slot.len] = '\0';
+    slot.shortcut = LaunchShortcut::None;
+    slot.appendEnterAtEnd = false;
+
+    queueTail_ = (queueTail_ + 1) % kQueueSize;
+    ++queueCount_;
+    return true;
+}
+
+bool HostKeyboard::enqueueWindowsCommand(std::string_view command) {
+    Threads::Scope lock(mutex_);
+    return enqueueShortcutCommandLocked_(command, LaunchShortcut::WindowsRunDialog);
+}
+
+bool HostKeyboard::enqueueLinuxCommand(std::string_view command) {
+    Threads::Scope lock(mutex_);
+    return enqueueShortcutCommandLocked_(command, LaunchShortcut::LinuxTerminal);
+}
+
+bool HostKeyboard::enqueueShortcutCommandLocked_(std::string_view command, HostKeyboard::LaunchShortcut shortcut) {
+    if (command.empty()) {
+        return false;
+    }
+
+    const std::size_t cmdLen = utf8TruncateToWholeCodepoints(command, kMaxTypeChars);
+    if (cmdLen == 0) {
+        return false;
+    }
+
+    if (!active_) {
+        startJobLocked_(command.substr(0, cmdLen), shortcut, true);
+        return true;
+    }
+
+    if (queueCount_ >= kQueueSize) {
+        return false;
+    }
+
+    auto& slot = queue_[queueTail_];
+    slot.len = cmdLen;
+    for (std::size_t i = 0; i < slot.len; ++i) {
+        slot.text[i] = command[i];
+    }
+    slot.text[slot.len] = '\0';
+    slot.shortcut = shortcut;
+    slot.appendEnterAtEnd = true;
 
     queueTail_ = (queueTail_ + 1) % kQueueSize;
     ++queueCount_;
@@ -263,6 +342,12 @@ void HostKeyboard::cancelAll() {
     index_ = 0;
     typed_ = 0;
     skipped_ = 0;
+    pendingShortcut_ = LaunchShortcut::None;
+    resumeTypingAtMs_ = 0;
+    nextTypeAtMs_ = 0;
+    appendEnterAtEnd_ = false;
+    pendingDeferredEnter_ = false;
+    sendEnterAtMs_ = 0;
     queueHead_ = 0;
     queueTail_ = 0;
     queueCount_ = 0;
@@ -274,9 +359,30 @@ void HostKeyboard::tick() {
 
 void HostKeyboard::typeNextChunk_(std::size_t maxChars) {
     Threads::Scope lock(mutex_);
+
+    auto finishJob = [&]() {
+        Logger::instance().printf("[HOSTKBD] typeText layout=AZERTY typed=%u skipped=%u len=%u\n",
+                                  static_cast<unsigned>(typed_),
+                                  static_cast<unsigned>(skipped_),
+                                  static_cast<unsigned>(len_));
+        active_ = false;
+        len_ = 0;
+        index_ = 0;
+        typed_ = 0;
+        skipped_ = 0;
+        pendingShortcut_ = LaunchShortcut::None;
+        resumeTypingAtMs_ = 0;
+        nextTypeAtMs_ = 0;
+        appendEnterAtEnd_ = false;
+        pendingDeferredEnter_ = false;
+        sendEnterAtMs_ = 0;
+    };
+
     if (!active_ && queueCount_ > 0) {
         const auto& slot = queue_[queueHead_];
-        startJobLocked_(std::string_view(slot.text.data(), slot.len));
+        startJobLocked_(std::string_view(slot.text.data(), slot.len),
+                        slot.shortcut,
+                        slot.appendEnterAtEnd);
 
         queueHead_ = (queueHead_ + 1) % kQueueSize;
         --queueCount_;
@@ -286,8 +392,58 @@ void HostKeyboard::typeNextChunk_(std::size_t maxChars) {
         return;
     }
 
+    if (pendingShortcut_ != LaunchShortcut::None) {
+        const std::uint32_t nowMs = millis();
+        if (resumeTypingAtMs_ == 0) {
+            switch (pendingShortcut_) {
+                case LaunchShortcut::WindowsRunDialog:
+                    pressWindowsRunShortcut();
+                    break;
+                case LaunchShortcut::LinuxTerminal:
+                    pressLinuxTerminalShortcut();
+                    break;
+                case LaunchShortcut::None:
+                default:
+                    break;
+            }
+            resumeTypingAtMs_ = nowMs + kShortcutFocusDelayMs;
+            return;
+        }
+
+        if (static_cast<std::int32_t>(nowMs - resumeTypingAtMs_) < 0) {
+            return;
+        }
+
+        pendingShortcut_ = LaunchShortcut::None;
+        resumeTypingAtMs_ = 0;
+    }
+
+    if (pendingDeferredEnter_) {
+        const std::uint32_t nowMs = millis();
+        if (sendEnterAtMs_ == 0) {
+            sendEnterAtMs_ = nowMs + kCommandEnterDelayMs;
+            return;
+        }
+
+        if (static_cast<std::int32_t>(nowMs - sendEnterAtMs_) < 0) {
+            return;
+        }
+
+        pressEnterKey();
+        finishJob();
+        return;
+    }
+
+    const bool pacedCommandTyping = appendEnterAtEnd_;
+    const std::uint32_t nowMs = millis();
+    if (pacedCommandTyping && nextTypeAtMs_ != 0 &&
+        static_cast<std::int32_t>(nowMs - nextTypeAtMs_) < 0) {
+        return;
+    }
+
     const std::size_t remaining = (index_ < len_) ? (len_ - index_) : 0;
-    const std::size_t todo = std::min<std::size_t>(remaining, maxChars);
+    const std::size_t todo = pacedCommandTyping ? std::min<std::size_t>(remaining, 1)
+                                                : std::min<std::size_t>(remaining, maxChars);
     std::size_t codepoints = 0;
     while (codepoints < todo && index_ < len_) {
         std::uint32_t cp = 0;
@@ -301,22 +457,27 @@ void HostKeyboard::typeNextChunk_(std::size_t maxChars) {
         index_ += consumed;
         (void)typeCodepoint(cp, typed_, skipped_);
         ++codepoints;
+
+        if (pacedCommandTyping) {
+            nextTypeAtMs_ = millis() + kCommandInterKeyDelayMs;
+        }
     }
 
     if (index_ >= len_) {
-        Logger::instance().printf("[HOSTKBD] typeText layout=AZERTY typed=%u skipped=%u len=%u\n",
-                                  static_cast<unsigned>(typed_),
-                                  static_cast<unsigned>(skipped_),
-                                  static_cast<unsigned>(len_));
-        active_ = false;
-        len_ = 0;
-        index_ = 0;
-        typed_ = 0;
-        skipped_ = 0;
+        if (appendEnterAtEnd_) {
+            appendEnterAtEnd_ = false;
+            pendingDeferredEnter_ = true;
+            sendEnterAtMs_ = 0;
+            return;
+        }
+
+        finishJob();
     }
 }
 
-void HostKeyboard::startJobLocked_(std::string_view text) {
+void HostKeyboard::startJobLocked_(std::string_view text,
+                                   HostKeyboard::LaunchShortcut shortcut,
+                                   bool appendEnterAtEnd) {
     len_ = utf8TruncateToWholeCodepoints(text, kMaxTypeChars);
     for (std::size_t i = 0; i < len_; ++i) {
         text_[i] = text[i];
@@ -325,5 +486,11 @@ void HostKeyboard::startJobLocked_(std::string_view text) {
     index_ = 0;
     typed_ = 0;
     skipped_ = 0;
+    pendingShortcut_ = shortcut;
+    resumeTypingAtMs_ = 0;
+    nextTypeAtMs_ = 0;
+    appendEnterAtEnd_ = appendEnterAtEnd;
+    pendingDeferredEnter_ = false;
+    sendEnterAtMs_ = 0;
     active_ = true;
 }

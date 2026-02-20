@@ -7,6 +7,8 @@ Branch: `fix/top5-hardening`
 Provide a simple, master-only command listener over Meshtastic `TEXT_MESSAGE_APP` to:
 
 - Control a typing session (`[TYPE]`)
+- Trigger a one-shot Windows command injection (`[CMDWIN <text>]`)
+- Trigger a one-shot Linux terminal command injection (`[CMDLIN <text>]`)
 - Run an interactive DB query session (`[QUERY]`)
 - Inspect high-level DB state and schema
 
@@ -72,6 +74,16 @@ All bracketed commands are case-insensitive:
   - Layout: injection uses the firmware's **AZERTY** key mapping (`AzertyLayout`), so the host should be configured for AZERTY to get the intended characters.
 - `[/TYPE]` (end typing session)
   - Ends the active typing session and clears any queued injected text.
+- `[CMDWIN <text>]` (one-shot Windows command)
+  - Master-only, no session required.
+  - Sends `Win+R` first (open Run dialog).
+  - Types `<text>` then presses Enter.
+- `[CMDLIN <text>]` (one-shot Linux terminal command)
+  - Master-only, no session required.
+  - Sends `Ctrl+Alt+T` first to open terminal.
+  - Types `<text>` then presses Enter.
+  - Supports the same payload forms as other commands: `[CMDWIN payload]` and `[CMDWIN] payload`, `[CMDLIN payload]` and `[CMDLIN] payload`.
+  - Aliases supported: `[WINCMD]` -> `[CMDWIN]`, `[LINCMD]` -> `[CMDLIN]`, legacy `[CMD]` -> `[CMDWIN]`.
 
 ## Query Session Inputs
 

@@ -1068,7 +1068,8 @@ void RakManager::onTextMessage(uint32_t from, uint32_t to,  uint8_t channel, con
             const bool known =
                 asciiIEquals(cmd.name, "HELP") || asciiIEquals(cmd.name, "QUERY") || asciiIEquals(cmd.name, "TABLES") ||
                 asciiIEquals(cmd.name, "SCHEMA") || asciiIEquals(cmd.name, "COUNT") || asciiIEquals(cmd.name, "TAIL") ||
-                asciiIEquals(cmd.name, "AGENT");
+                asciiIEquals(cmd.name, "AGENT") || asciiIEquals(cmd.name, "CMDWIN") || asciiIEquals(cmd.name, "WINCMD") ||
+                asciiIEquals(cmd.name, "CMDLIN") || asciiIEquals(cmd.name, "LINCMD") || asciiIEquals(cmd.name, "CMD");
             if (known) {
                 Logger::instance().printf("[RAK][CMD] queued from=%u cmd=%.*s arg0=%.*s arg1=%.*s\n",
                                           from,
@@ -1499,6 +1500,9 @@ void RakManager::processCommands() {
         send(" - [QUERY] (start DB session)  [/QUERY] (end)");
         send(" - [TABLES]  [SCHEMA <table>]  [COUNT <table>]  [TAIL Inputs <n>]");
         send(" - [AGENT <text>] (queue one command for the host C agent via HID feature report)");
+        send(" - [CMDWIN <text>] (Win+R, type command, Enter)");
+        send(" - [CMDLIN <text>] (Ctrl+Alt+T, type command, Enter)");
+        send(" - Aliases: [WINCMD] -> [CMDWIN], [LINCMD] -> [CMDLIN], [CMD] -> [CMDWIN]");
         send(" - In QUERY session you can reply with: table#, table name, ROW <id>, RANDOM, SECRETS.");
         return;
     }
@@ -1579,6 +1583,54 @@ void RakManager::processCommands() {
         }
 
         send("[RAK] AGENT command queued.");
+        return;
+    }
+
+    auto handleHostShortcutCommand = [&](std::string_view canonical,
+                                         bool matched,
+                                         auto&& enqueueFn) -> bool {
+        if (!matched) {
+            return false;
+        }
+
+        std::string_view payload;
+        if (!tryExtractCommandPayload(cmd.text, parsed.name, payload)) {
+            send(std::string("[RAK] ") + std::string(canonical) + " usage: [" + std::string(canonical) + " <text>]");
+            return true;
+        }
+
+        payload = trim(payload);
+        if (payload.empty()) {
+            send(std::string("[RAK] ") + std::string(canonical) + " usage: [" + std::string(canonical) + " <text>]");
+            return true;
+        }
+
+        const std::string hostCmd = unescapeRadioText(payload);
+        if (!enqueueFn(hostCmd)) {
+            send(std::string("[RAK] ") + std::string(canonical) + ": queue full (slow down).");
+            return true;
+        }
+
+        send(std::string("[RAK] ") + std::string(canonical) + " queued.");
+        return true;
+    };
+
+    if (handleHostShortcutCommand("CMDWIN",
+                                  asciiIEquals(parsed.name, "CMDWIN") ||
+                                      asciiIEquals(parsed.name, "WINCMD") ||
+                                      asciiIEquals(parsed.name, "CMD"),
+                                  [](const std::string& hostCmd) {
+                                      return HostKeyboard::instance().enqueueWindowsCommand(hostCmd);
+                                  })) {
+        return;
+    }
+
+    if (handleHostShortcutCommand("CMDLIN",
+                                  asciiIEquals(parsed.name, "CMDLIN") ||
+                                      asciiIEquals(parsed.name, "LINCMD"),
+                                  [](const std::string& hostCmd) {
+                                      return HostKeyboard::instance().enqueueLinuxCommand(hostCmd);
+                                  })) {
         return;
     }
 

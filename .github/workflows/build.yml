@@ -1,0 +1,28 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW
+        run: sudo apt-get install -y mingw-w64
+
+      - name: Build
+        run: |
+          x86_64-w64-mingw32-gcc -O2 -s -Wall -Wextra \
+            -static -static-libgcc -static-libstdc++ \
+            -Iimplant -o implant/implant.exe \
+            implant/implant.c implant/hid.c \
+            -lsetupapi -lhid -lcfgmgr32 -lole32 -luser32 -lkernel32
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: implant/implant.exe
