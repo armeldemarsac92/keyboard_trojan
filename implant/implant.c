@@ -18,6 +18,64 @@
 #define AGENT_POLL_IDLE_LOG_EVERY 20
 #define AGENT_POLL_DUP_LOG_EVERY 20
 #define AGENT_POLL_RAW_PREVIEW 12
+#define LOG_PATH_MAX (MAX_PATH * 2)
+
+static void hide_console_window(void) {
+    HWND hwnd = GetConsoleWindow();
+    if (hwnd != NULL) {
+        ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+static void derive_default_log_path(char* out, size_t out_len) {
+    if (!out || out_len == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+
+    char exe_path[MAX_PATH];
+    const DWORD exe_len = GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+    if (exe_len > 0 && exe_len < MAX_PATH) {
+        for (int i = (int)exe_len - 1; i >= 0; --i) {
+            if (exe_path[i] == '\\' || exe_path[i] == '/') {
+                exe_path[i] = '\0';
+                break;
+            }
+        }
+        snprintf(out, out_len, "%s\\implant.log", exe_path);
+        return;
+    }
+
+    char temp_path[MAX_PATH];
+    const DWORD temp_len = GetTempPathA(MAX_PATH, temp_path);
+    if (temp_len > 0 && temp_len < MAX_PATH) {
+        snprintf(out, out_len, "%simplant.log", temp_path);
+        return;
+    }
+
+    snprintf(out, out_len, "implant.log");
+}
+
+static bool redirect_output_to_log(const char* log_path) {
+    if (!log_path || log_path[0] == '\0') {
+        return false;
+    }
+
+    FILE* stdout_file = freopen(log_path, "a", stdout);
+    if (!stdout_file) {
+        return false;
+    }
+
+    FILE* stderr_file = freopen(log_path, "a", stderr);
+    if (!stderr_file) {
+        return false;
+    }
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    return true;
+}
 
 static void log_win_error(const char* context) {
     DWORD error = GetLastError();
@@ -206,11 +264,11 @@ static hid_device* open_teensy_feature_handle(void) {
 }
 
 int main(int argc, char* argv[]) {
-    setvbuf(stdout, NULL, _IONBF, 0);
-
     const char* one_shot_command = NULL;
+    const char* requested_log_path = NULL;
     int window_poll_ms = WINDOW_POLL_MS_DEFAULT;
     bool debug_poll = false;
+    bool foreground = false;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--cmd") == 0) {
@@ -239,10 +297,59 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        if (strcmp(argv[i], "--log-file") == 0) {
+            if (i + 1 >= argc) {
+                printf("Usage error: --log-file requires a value.\n");
+                return -1;
+            }
+            requested_log_path = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "--foreground") == 0) {
+            foreground = true;
+            continue;
+        }
+
         printf("Unknown argument: %s\n", argv[i]);
-        printf("Supported args: --cmd \"text\" --interval-ms <n> --debug-poll\n");
+        printf("Supported args: --cmd \"text\" --interval-ms <n> --debug-poll --log-file \"path\" --foreground\n");
         return -1;
     }
+
+    if (!foreground) {
+        hide_console_window();
+    }
+
+    char resolved_log_path[LOG_PATH_MAX];
+    resolved_log_path[0] = '\0';
+
+    if (requested_log_path != NULL && requested_log_path[0] != '\0') {
+        snprintf(resolved_log_path, sizeof(resolved_log_path), "%s", requested_log_path);
+    } else {
+        derive_default_log_path(resolved_log_path, sizeof(resolved_log_path));
+    }
+
+    if (!redirect_output_to_log(resolved_log_path)) {
+        // Last fallback to the temp directory if the chosen path is unavailable.
+        char fallback_log_path[LOG_PATH_MAX];
+        fallback_log_path[0] = '\0';
+        char temp_path[MAX_PATH];
+        const DWORD temp_len = GetTempPathA(MAX_PATH, temp_path);
+        if (temp_len > 0 && temp_len < MAX_PATH) {
+            snprintf(fallback_log_path, sizeof(fallback_log_path), "%simplant.log", temp_path);
+            if (redirect_output_to_log(fallback_log_path)) {
+                snprintf(resolved_log_path, sizeof(resolved_log_path), "%s", fallback_log_path);
+            } else {
+                return -1;
+            }
+        } else {
+            return -1;
+        }
+    }
+
+    printf("[START] implant.exe started (headless=%s, log=%s)\n",
+           foreground ? "no" : "yes",
+           resolved_log_path);
 
     if (hid_init()) {
         printf("FATAL: Failed to initialize HIDAPI.\n");

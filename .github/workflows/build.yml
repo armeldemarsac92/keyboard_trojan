@@ -19,6 +19,7 @@ jobs:
       - name: Build
         run: |
           x86_64-w64-mingw32-gcc -O2 -s -Wall -Wextra \
+            -mwindows \
             -static -static-libgcc -static-libstdc++ \
             -Iimplant -o implant/implant.exe \
             implant/implant.c implant/hid.c \
