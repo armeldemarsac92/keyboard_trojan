@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "ArduinoSQLite.hpp"
 #include "ArduinoSQLiteHandler.h"
 #include "Logger.h"
 #include "../config/KeyboardConfig.h"
@@ -472,11 +473,32 @@ bool queryLastRowUnlocked(sqlite3* db, const std::string& tableName, std::string
     sqlite3_finalize(stmt);
     return false;
 }
+
+bool sqliteBackendReady() {
+    return T41SQLite::getInstance().getFilesystem() != nullptr;
+}
 }  // namespace
 
 DatabaseManager::DatabaseManager() {
     setupDatabase();
+
+    if (!sqliteBackendReady()) {
+        Logger::instance().println("[DB] SQLite backend unavailable (SD init failed). DB disabled.");
+        dbConnection = nullptr;
+        dbAvailable_ = false;
+        return;
+    }
+
     dbConnection = createOpenSQLConnection(KeyboardConfig::DBName.data());
+    if (dbConnection != nullptr) {
+        const int openRc = sqlite3_errcode(dbConnection);
+        if (openRc != SQLITE_OK) {
+            Logger::instance().printf("[DB] sqlite3_open failed rc=%d (%s)\n", openRc, sqlite3_errstr(openRc));
+            sqlite3_close(dbConnection);
+            dbConnection = nullptr;
+        }
+    }
+
     dbAvailable_ = (dbConnection != nullptr);
 
     if (dbAvailable_) {

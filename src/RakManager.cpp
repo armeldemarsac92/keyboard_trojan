@@ -1794,6 +1794,13 @@ void RakManager::listenerThread(void* arg) {
         if (now - lastActionTime >= kHeartbeatIntervalMs) {
             lastActionTime = now;
 
+            if (instance.querySession_.has_value()) {
+                Logger::instance().println("[RAK] heartbeat skipped (QUERY session active)");
+                instance.transport_.tick(now);
+                threads.yield();
+                continue;
+            }
+
             Logger::instance().println("Sending rak heartbeat to known masters");
 
             std::vector<KeyboardConfig::NodeInfo> mastersSnapshot;
