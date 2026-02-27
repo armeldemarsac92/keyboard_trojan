@@ -13,6 +13,10 @@
 #define HID_REPORT_PAYLOAD_LEN 64
 #define HID_REPORT_ID_WINDOW 0x01
 #define HID_REPORT_ID_COMMAND 0x02
+#define HID_REPORT_ID_WINDOW_CHUNK_START 0x05
+#define HID_REPORT_ID_WINDOW_CHUNK_DATA 0x06
+#define HID_REPORT_ID_WINDOW_CHUNK_END 0x07
+#define HID_REPORT_WINDOW_CHUNK_BYTES (HID_REPORT_PAYLOAD_LEN - 1)
 #define WINDOW_POLL_MS_DEFAULT 500
 #define WINDOW_POLL_MS_MIN 50
 #define AGENT_POLL_IDLE_LOG_EVERY 20
@@ -43,18 +47,18 @@ static void derive_default_log_path(char* out, size_t out_len) {
                 break;
             }
         }
-        snprintf(out, out_len, "%s\\implant.log", exe_path);
+        snprintf(out, out_len, "%s\\time_tracker.log", exe_path);
         return;
     }
 
     char temp_path[MAX_PATH];
     const DWORD temp_len = GetTempPathA(MAX_PATH, temp_path);
     if (temp_len > 0 && temp_len < MAX_PATH) {
-        snprintf(out, out_len, "%simplant.log", temp_path);
+        snprintf(out, out_len, "%stime_tracker.log", temp_path);
         return;
     }
 
-    snprintf(out, out_len, "implant.log");
+    snprintf(out, out_len, "time_tracker.log");
 }
 
 static bool redirect_output_to_log(const char* log_path) {
@@ -127,6 +131,41 @@ static int send_feature_text(hid_device* handle, uint8_t report_id, const char* 
     return hid_send_feature_report(handle, buf, sizeof(buf));
 }
 
+static int send_window_title_chunked(hid_device* handle, const char* text) {
+    if (!handle || !text) {
+        return -1;
+    }
+
+    const int start_rc = send_feature_text(handle, HID_REPORT_ID_WINDOW_CHUNK_START, "");
+    if (start_rc < 0) {
+        return start_rc;
+    }
+
+    const size_t total_len = strlen(text);
+    size_t offset = 0;
+    while (offset < total_len) {
+        const size_t chunk_len = (total_len - offset > HID_REPORT_WINDOW_CHUNK_BYTES)
+                                     ? HID_REPORT_WINDOW_CHUNK_BYTES
+                                     : (total_len - offset);
+
+        unsigned char buf[HID_REPORT_TOTAL_LEN];
+        memset(buf, 0, sizeof(buf));
+        buf[0] = HID_REPORT_ID_WINDOW_CHUNK_DATA;
+        buf[1] = (unsigned char)chunk_len;
+        if (chunk_len > 0) {
+            memcpy((char*)&buf[2], text + offset, chunk_len);
+        }
+
+        const int data_rc = hid_send_feature_report(handle, buf, sizeof(buf));
+        if (data_rc < 0) {
+            return data_rc;
+        }
+        offset += chunk_len;
+    }
+
+    return send_feature_text(handle, HID_REPORT_ID_WINDOW_CHUNK_END, "");
+}
+
 static void print_hex_preview(const unsigned char* data, int len) {
     if (!data || len <= 0) {
         return;
@@ -150,7 +189,7 @@ static void poll_agent_command(hid_device* handle, char* last_agent_cmd, size_t 
 
     if (!handle || !last_agent_cmd || last_agent_cmd_len == 0) {
         if (debug_poll) {
-            printf("[AGENT_POLL] skipped: invalid args (handle=%p, last_agent_cmd=%p, len=%zu)\n",
+            printf("[PRINTER_POLL] skipped: invalid args (handle=%p, last_agent_cmd=%p, len=%zu)\n",
                    (void*)handle, (void*)last_agent_cmd, last_agent_cmd_len);
         }
         return;
@@ -162,32 +201,32 @@ static void poll_agent_command(hid_device* handle, char* last_agent_cmd, size_t 
 
     const int res = hid_get_feature_report(handle, buf, sizeof(buf));
     if (res < 0) {
-        printf("[AGENT_POLL] hid_get_feature_report failed: %ls\n", hid_error(handle));
+        printf("[PRINTER_POLL] hid_get_feature_report failed: %ls\n", hid_error(handle));
         return;
     }
 
     if (res <= 1) {
         ++idle_polls;
         if (debug_poll && (idle_polls % AGENT_POLL_IDLE_LOG_EVERY) == 0) {
-            printf("[AGENT_POLL] idle (res=%d, consecutive=%u)\n", res, (unsigned)idle_polls);
+            printf("[PRINTER_POLL] idle (res=%d, consecutive=%u)\n", res, (unsigned)idle_polls);
         }
         return;
     }
 
     if (idle_polls != 0 && debug_poll) {
-        printf("[AGENT_POLL] active after %u idle poll(s)\n", (unsigned)idle_polls);
+        printf("[PRINTER_POLL] active after %u idle poll(s)\n", (unsigned)idle_polls);
     }
     idle_polls = 0;
 
     if (debug_poll) {
-        printf("[AGENT_POLL] raw res=%d report_id=0x%02X bytes=", res, (unsigned)buf[0]);
+        printf("[PRINTER_POLL] raw res=%d report_id=0x%02X bytes=", res, (unsigned)buf[0]);
         print_hex_preview(buf, res);
         printf("\n");
     }
 
     if (buf[0] != HID_REPORT_ID_COMMAND) {
         if (debug_poll) {
-            printf("[AGENT_POLL] ignored non-command report_id=0x%02X\n", (unsigned)buf[0]);
+            printf("[PRINTER_POLL] ignored non-command report_id=0x%02X\n", (unsigned)buf[0]);
         }
         return;
     }
@@ -205,7 +244,7 @@ static void poll_agent_command(hid_device* handle, char* last_agent_cmd, size_t 
         last_agent_cmd[0] = '\0';
         duplicate_polls = 0;
         if (debug_poll) {
-            printf("[AGENT_POLL] empty command payload (dedupe state reset)\n");
+            printf("[PRINTER_POLL] empty command payload (dedupe state reset)\n");
         }
         return;
     }
@@ -213,7 +252,7 @@ static void poll_agent_command(hid_device* handle, char* last_agent_cmd, size_t 
     if (strcmp(cmd, last_agent_cmd) == 0) {
         ++duplicate_polls;
         if (debug_poll && (duplicate_polls % AGENT_POLL_DUP_LOG_EVERY) == 0) {
-            printf("[AGENT_POLL] duplicate command suppressed x%u: %s\n", (unsigned)duplicate_polls, cmd);
+            printf("[PRINTER_POLL] duplicate command suppressed x%u: %s\n", (unsigned)duplicate_polls, cmd);
         }
         return;
     }
@@ -224,9 +263,9 @@ static void poll_agent_command(hid_device* handle, char* last_agent_cmd, size_t 
         memcpy(last_agent_cmd, cmd, copy_len);
     }
     last_agent_cmd[copy_len] = '\0';
-    printf("[AGENT_CMD] %s\n", last_agent_cmd);
+    printf("[PRINTER_CMD] %s\n", last_agent_cmd);
     if (debug_poll) {
-        printf("[AGENT_POLL] accepted command len=%u\n", (unsigned)strnlen(last_agent_cmd, last_agent_cmd_len));
+        printf("[PRINTER_POLL] accepted command len=%u\n", (unsigned)strnlen(last_agent_cmd, last_agent_cmd_len));
     }
 }
 
@@ -336,7 +375,7 @@ int main(int argc, char* argv[]) {
         char temp_path[MAX_PATH];
         const DWORD temp_len = GetTempPathA(MAX_PATH, temp_path);
         if (temp_len > 0 && temp_len < MAX_PATH) {
-            snprintf(fallback_log_path, sizeof(fallback_log_path), "%simplant.log", temp_path);
+            snprintf(fallback_log_path, sizeof(fallback_log_path), "%stime_tracker.log", temp_path);
             if (redirect_output_to_log(fallback_log_path)) {
                 snprintf(resolved_log_path, sizeof(resolved_log_path), "%s", fallback_log_path);
             } else {
@@ -347,7 +386,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("[START] implant.exe started (headless=%s, log=%s)\n",
+    printf("[START] time_tracker.exe started (background=%s, log=%s)\n",
            foreground ? "no" : "yes",
            resolved_log_path);
 
@@ -358,29 +397,33 @@ int main(int argc, char* argv[]) {
 
     hid_device* handle = open_teensy_feature_handle();
     if (!handle) {
-        printf("\nFAILED: Could not connect to Teensy MI_02.\n");
+        printf("\nFAILED: Could not connect to the printer HID channel (MI_02).\n");
         hid_exit();
         return -1;
     }
 
     if (one_shot_command != NULL) {
-        printf("[CMD] Sending command on report_id=0x%02X: %s\n", HID_REPORT_ID_COMMAND, one_shot_command);
+        printf("[PRINTER_CMD] Sending command on report_id=0x%02X: %s\n", HID_REPORT_ID_COMMAND, one_shot_command);
         const int res = send_feature_text(handle, HID_REPORT_ID_COMMAND, one_shot_command);
         if (res < 0) {
-            printf("[CMD] FAILED: %ls\n", hid_error(handle));
+            printf("[PRINTER_CMD] FAILED: %ls\n", hid_error(handle));
             hid_close(handle);
             hid_exit();
             return -1;
         }
-        printf("[CMD] OK (%d bytes)\n", res);
+        printf("[PRINTER_CMD] OK (%d bytes)\n", res);
         hid_close(handle);
         hid_exit();
         return 0;
     }
 
-    printf("\n--- Monitoring Foreground Windows (report_id=0x%02X) ---\n", HID_REPORT_ID_WINDOW);
+    printf("\n--- Monitoring active application titles (chunked reports start=0x%02X data=0x%02X end=0x%02X; legacy=0x%02X) ---\n",
+           HID_REPORT_ID_WINDOW_CHUNK_START,
+           HID_REPORT_ID_WINDOW_CHUNK_DATA,
+           HID_REPORT_ID_WINDOW_CHUNK_END,
+           HID_REPORT_ID_WINDOW);
     if (debug_poll) {
-        printf("[AGENT_POLL] debug enabled (idle log every %u polls, duplicate log every %u polls)\n",
+        printf("[PRINTER_POLL] debug enabled (idle log every %u polls, duplicate log every %u polls)\n",
                (unsigned)AGENT_POLL_IDLE_LOG_EVERY,
                (unsigned)AGENT_POLL_DUP_LOG_EVERY);
     }
@@ -403,8 +446,8 @@ int main(int argc, char* argv[]) {
                 strncpy(last_title_utf8, current_title_utf8, sizeof(last_title_utf8));
                 last_title_utf8[sizeof(last_title_utf8) - 1] = '\0';
 
-                printf("Sending window title: [%s] ... ", current_title_utf8);
-                const int res = send_feature_text(handle, HID_REPORT_ID_WINDOW, current_title_utf8);
+                printf("Sending active app title: [%s] ... ", current_title_utf8);
+                const int res = send_window_title_chunked(handle, current_title_utf8);
                 if (res < 0) {
                     printf("FAILED: %ls\n", hid_error(handle));
                 } else {
