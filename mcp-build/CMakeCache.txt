@@ -1,0 +1,2 @@
+CMAKE_SOURCE_DIR:PATH=/home/armeldemarsac/Documents/Personnal/Development/Projects/School/Virus/Keyboard
+CMAKE_PROJECT_NAME:STATIC=Keyboard
